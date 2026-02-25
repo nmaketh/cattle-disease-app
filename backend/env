@@ -1,0 +1,3 @@
+$env:INFERENCE_API_URL="https://cattle-disease-ai.onrender.com"
+$env:INFERENCE_ALLOW_RULES_FALLBACK="false"
+$env:INFERENCE_STRICT_MODE="true"

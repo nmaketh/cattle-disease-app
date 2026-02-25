@@ -1,0 +1,1743 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher_string.dart';
+
+import '../../../core/api/api_client.dart';
+import '../../../widgets/status_chip.dart';
+import '../../auth/bloc/auth_bloc.dart';
+import '../../auth/bloc/auth_state.dart';
+import '../../settings/data/settings_repository.dart';
+import '../bloc/case_bloc.dart';
+import '../bloc/case_event.dart';
+import '../bloc/case_state.dart';
+import '../data/case_repository.dart';
+import '../model/case_record.dart';
+
+enum _CaseDetailSection { overview, evidence, notes, workflow }
+
+class CaseDetailPage extends StatefulWidget {
+  const CaseDetailPage({super.key, required this.caseId});
+
+  final String caseId;
+
+  @override
+  State<CaseDetailPage> createState() => _CaseDetailPageState();
+}
+
+class _CaseDetailPageState extends State<CaseDetailPage> {
+  final _notesController = TextEditingController();
+  final _assessmentController = TextEditingController(text: 'suspected');
+  final _planController = TextEditingController(text: 'monitor');
+  final _prescriptionController = TextEditingController();
+  final _followUpDateController = TextEditingController();
+  String? _boundCaseId;
+  bool _isExporting = false;
+  bool _isTimelineLoading = false;
+  bool _isActionLoading = false;
+  String _workflowStatus = 'unknown';
+  String _userRole = 'chw';
+  List<Map<String, dynamic>> _timelineMessages = const [];
+  List<Map<String, dynamic>> _timelineReviews = const [];
+  List<Map<String, dynamic>> _timelineReceipts = const [];
+  Map<String, dynamic> _workflowParticipants = const {};
+  int _chatUnreadCount = 0;
+  String? _lastChatAlertSignature;
+  DateTime? _lastChatAlertAt;
+  bool _workflowLoadedOnce = false;
+  bool _chatSheetOpen = false;
+  _CaseDetailSection _detailSection = _CaseDetailSection.overview;
+  Timer? _pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<CaseBloc>().add(CaseOpenedById(widget.caseId));
+      _loadWorkflow(widget.caseId);
+    });
+    _pollTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) {
+        _loadWorkflow(widget.caseId);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _notesController.dispose();
+    _assessmentController.dispose();
+    _planController.dispose();
+    _prescriptionController.dispose();
+    _followUpDateController.dispose();
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  String _chatLastSeenKey(String role, String caseId) => 'chat_last_seen_${role}_$caseId';
+
+  Map<String, String?> _currentActorIdentity() {
+    final authState = context.read<AuthBloc>().state;
+    if (authState is AuthAuthenticated) {
+      return {
+        'id': authState.user.id,
+        'name': authState.user.name.trim().isEmpty ? null : authState.user.name.trim(),
+        'email': authState.user.email.trim().isEmpty ? null : authState.user.email.trim().toLowerCase(),
+      };
+    }
+    return const {'id': null, 'name': null, 'email': null};
+  }
+
+  String _participantLabel(Map<String, dynamic>? participant, {required String empty}) {
+    final p = participant ?? const <String, dynamic>{};
+    final name = (p['name'] ?? '').toString().trim();
+    final email = (p['email'] ?? '').toString().trim();
+    if (name.isNotEmpty && email.isNotEmpty) return '$name ($email)';
+    if (name.isNotEmpty) return name;
+    if (email.isNotEmpty) return email;
+    return empty;
+  }
+
+  Map<String, dynamic> _assignedVetParticipant() {
+    final raw = _workflowParticipants['assignedVet'];
+    if (raw is Map) {
+      return Map<String, dynamic>.from(raw);
+    }
+    return <String, dynamic>{};
+  }
+
+  bool _hasAssignedVet() {
+    final vet = _assignedVetParticipant();
+    return ['id', 'name', 'email'].any((k) => (vet[k] ?? '').toString().trim().isNotEmpty);
+  }
+
+  bool _currentVetOwnsCase() {
+    if (_userRole != 'vet') return false;
+    final actor = _currentActorIdentity();
+    final vet = _assignedVetParticipant();
+    final actorId = (actor['id'] ?? '').toString().trim();
+    final actorName = (actor['name'] ?? '').toString().trim().toLowerCase();
+    final actorEmail = (actor['email'] ?? '').toString().trim().toLowerCase();
+    final vetId = (vet['id'] ?? '').toString().trim();
+    final vetName = (vet['name'] ?? '').toString().trim().toLowerCase();
+    final vetEmail = (vet['email'] ?? '').toString().trim().toLowerCase();
+    if (actorId.isNotEmpty && vetId.isNotEmpty && actorId == vetId) return true;
+    if (actorEmail.isNotEmpty && vetEmail.isNotEmpty && actorEmail == vetEmail) return true;
+    if (actorName.isNotEmpty && vetName.isNotEmpty && actorName == vetName) return true;
+    return false;
+  }
+
+  bool _isHumanChatMessage(Map<String, dynamic> msg, String role) {
+    final sender = (msg['senderRole'] ?? '').toString().trim().toLowerCase();
+    if (sender.isEmpty) return false;
+    if (sender == role.toLowerCase()) return false;
+    if (sender == 'system' || sender == 'receipt') return false;
+    final body = (msg['message'] ?? '').toString().trim();
+    return body.isNotEmpty;
+  }
+
+  Future<int> _computeUnreadCount(String caseId, String role, List<Map<String, dynamic>> messages) async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastSeen = prefs.getString(_chatLastSeenKey(role, caseId));
+    int count = 0;
+    for (final msg in messages) {
+      if (!_isHumanChatMessage(msg, role)) continue;
+      final ts = msg['createdAt']?.toString() ?? '';
+      if (ts.isEmpty) continue;
+      if (lastSeen == null || ts.compareTo(lastSeen) > 0) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  Future<void> _markChatSeen(String caseId, String role, List<Map<String, dynamic>> messages) async {
+    final latest = messages.reversed.firstWhere(
+      (m) => _isHumanChatMessage(m, role),
+      orElse: () => <String, dynamic>{},
+    );
+    final ts = latest['createdAt']?.toString().trim() ?? '';
+    if (ts.isEmpty) {
+      if (mounted && _chatUnreadCount != 0) {
+        setState(() => _chatUnreadCount = 0);
+      }
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_chatLastSeenKey(role, caseId), ts);
+    if (mounted && _chatUnreadCount != 0) {
+      setState(() => _chatUnreadCount = 0);
+    }
+  }
+
+  Future<void> _loadWorkflow(String caseId) async {
+    if (_isTimelineLoading) {
+      return;
+    }
+    setState(() => _isTimelineLoading = true);
+    try {
+      final settingsRepository = context.read<SettingsRepository>();
+      final caseRepository = context.read<CaseRepository>();
+      final settings = await settingsRepository.load();
+      final timeline = await caseRepository.getCaseTimeline(caseId);
+      if (!mounted) {
+        return;
+      }
+      final msgs = timeline['messages'];
+      final revs = timeline['reviews'];
+      final recs = timeline['receipts'];
+      final parsedMsgs = msgs is List
+          ? msgs.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(growable: false)
+          : const <Map<String, dynamic>>[];
+      final parsedRevs = revs is List
+          ? revs.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(growable: false)
+          : const <Map<String, dynamic>>[];
+      final parsedRecs = recs is List
+          ? recs.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(growable: false)
+          : const <Map<String, dynamic>>[];
+      final participantsRaw = timeline['participants'];
+      final participants = participantsRaw is Map
+          ? Map<String, dynamic>.from(participantsRaw)
+          : const <String, dynamic>{};
+      final prevUnreadCount = _chatUnreadCount;
+      final isFirstWorkflowLoad = !_workflowLoadedOnce;
+      final unreadCount = await _computeUnreadCount(caseId, settings.userRole, parsedMsgs);
+      final latestUnread = parsedMsgs.reversed.firstWhere(
+        (m) => _isHumanChatMessage(m, settings.userRole),
+        orElse: () => <String, dynamic>{},
+      );
+      final latestSig = latestUnread.isEmpty
+          ? null
+          : '${latestUnread['id'] ?? ''}|${latestUnread['createdAt'] ?? ''}|${latestUnread['senderRole'] ?? ''}';
+      final now = DateTime.now();
+      final alertCooldownPassed =
+          _lastChatAlertAt == null || now.difference(_lastChatAlertAt!) >= const Duration(seconds: 10);
+      final shouldAlert =
+          !_chatSheetOpen &&
+          !isFirstWorkflowLoad &&
+          unreadCount > prevUnreadCount &&
+          unreadCount > 0 &&
+          latestSig != null &&
+          latestSig != _lastChatAlertSignature &&
+          alertCooldownPassed;
+      setState(() {
+        _userRole = settings.userRole;
+        _workflowStatus = timeline['workflowStatus']?.toString() ?? 'unknown';
+        _timelineMessages = parsedMsgs;
+        _timelineReviews = parsedRevs;
+        _timelineReceipts = parsedRecs;
+        _workflowParticipants = participants;
+        _chatUnreadCount = unreadCount;
+        _workflowLoadedOnce = true;
+        if (latestSig != null) {
+          _lastChatAlertSignature = latestSig;
+        }
+        if (shouldAlert) {
+          _lastChatAlertAt = now;
+        }
+      });
+      if (shouldAlert && mounted) {
+        final senderLabel = (latestUnread['senderName'] ?? latestUnread['senderRole'] ?? 'New message')
+            .toString()
+            .trim();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              unreadCount == 1
+                  ? 'New message from $senderLabel'
+                  : '$unreadCount unread messages in case chat',
+            ),
+            action: SnackBarAction(
+              label: 'Open',
+              onPressed: () => _openChatInline(caseId),
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (_) {
+      // Keep the rest of page usable.
+    } finally {
+      if (mounted) {
+        setState(() => _isTimelineLoading = false);
+      }
+    }
+  }
+
+  Future<void> _submitVetReview(String caseId) async {
+    final assessment = _assessmentController.text.trim();
+    final plan = _planController.text.trim();
+    final prescription = _prescriptionController.text.trim();
+    final followUpDate = _followUpDateController.text.trim();
+    if (assessment.isEmpty || plan.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Assessment and plan are required.')),
+      );
+      return;
+    }
+    if (plan.toLowerCase() == 'treatment' && prescription.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Prescription is required for treatment plan.')),
+      );
+      return;
+    }
+    if (followUpDate.isNotEmpty && DateTime.tryParse(followUpDate) == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Follow-up date must be YYYY-MM-DD.')),
+      );
+      return;
+    }
+    setState(() => _isActionLoading = true);
+    try {
+      await context.read<CaseRepository>().submitVetReview(
+        caseId: caseId,
+        senderId: _currentActorIdentity()['id'],
+        senderName: _currentActorIdentity()['name'],
+        senderEmail: _currentActorIdentity()['email'],
+        assessment: assessment,
+        plan: plan,
+        prescription: prescription,
+        followUpDate: followUpDate,
+        message: 'Vet advice updated.',
+      );
+      await _loadWorkflow(caseId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Vet review submitted.')),
+        );
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isActionLoading = false);
+      }
+    }
+  }
+
+  Future<void> _sendToVet(String caseId) async {
+    final settings = await context.read<SettingsRepository>().load();
+    if (!mounted) {
+      return;
+    }
+    final defaultVetEmail = settings.vetEmail.trim();
+    final currentParticipants = _workflowParticipants;
+    final assignedVetRaw = currentParticipants['assignedVet'];
+    final currentVet = assignedVetRaw is Map ? Map<String, dynamic>.from(assignedVetRaw) : <String, dynamic>{};
+    final assignedVetEmail = (currentVet['email'] ?? '').toString().trim();
+    final defaultVetName = (currentVet['name'] ?? '').toString().trim();
+    final alreadyAssigned = assignedVetEmail.isNotEmpty;
+    final vetEmailController = TextEditingController(text: alreadyAssigned ? assignedVetEmail : defaultVetEmail);
+    final vetNameController = TextEditingController(text: defaultVetName);
+    final msgController = TextEditingController(
+      text: alreadyAssigned ? 'Case follow-up update sent to assigned vet.' : 'Case referred to vet for review.',
+    );
+    final notesController = TextEditingController(text: _notesController.text.trim());
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Send to Vet'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: vetNameController,
+                  readOnly: alreadyAssigned,
+                  decoration: InputDecoration(
+                    labelText: 'Vet name ${alreadyAssigned ? '(locked)' : '(optional)'}',
+                    helperText: alreadyAssigned
+                        ? 'Case already assigned. CHW can re-send updates to this vet only.'
+                        : null,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: vetEmailController,
+                  readOnly: alreadyAssigned,
+                  decoration: InputDecoration(
+                    labelText: 'Vet email${alreadyAssigned ? ' (locked)' : ''}',
+                    helperText: alreadyAssigned
+                        ? 'To change vets, the assigned vet must transfer the case.'
+                        : null,
+                  ),
+                  keyboardType: TextInputType.emailAddress,
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: msgController,
+                  decoration: const InputDecoration(labelText: 'Referral message'),
+                  minLines: 2,
+                  maxLines: 3,
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: notesController,
+                  decoration: const InputDecoration(labelText: 'Notes (optional)'),
+                  minLines: 2,
+                  maxLines: 3,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(alreadyAssigned ? 'Re-send' : 'Send'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) {
+        return;
+      }
+      final email = vetEmailController.text.trim();
+      if (email.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Vet email is required to send referral.')),
+        );
+        return;
+      }
+      setState(() => _isActionLoading = true);
+      await context.read<CaseRepository>().sendCaseToVet(
+        caseId: caseId,
+        senderRole: _userRole,
+        senderId: _currentActorIdentity()['id'],
+        senderName: _currentActorIdentity()['name'],
+        senderEmail: _currentActorIdentity()['email'],
+        vetEmail: email,
+        vetName: vetNameController.text.trim(),
+        message: msgController.text.trim(),
+        notes: notesController.text.trim(),
+      );
+      _notesController.text = notesController.text.trim();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Referral sent to vet.')),
+        );
+      }
+      await _loadWorkflow(caseId);
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      vetEmailController.dispose();
+      vetNameController.dispose();
+      msgController.dispose();
+      notesController.dispose();
+      if (mounted) {
+        setState(() => _isActionLoading = false);
+      }
+    }
+  }
+
+  Future<void> _openChatInline(String caseId) async {
+    if (_userRole == 'vet' && _hasAssignedVet() && !_currentVetOwnsCase()) {
+      final vetLabel = _participantLabel(_assignedVetParticipant(), empty: 'another assigned vet');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Chat is restricted to the assigned vet ($vetLabel). Transfer is required before continuing this case.',
+          ),
+        ),
+      );
+      return;
+    }
+    final messageController = TextEditingController();
+    final scrollController = ScrollController();
+    bool sending = false;
+    bool loading = false;
+    String? error;
+    List<Map<String, dynamic>> messages = List<Map<String, dynamic>>.from(_timelineMessages);
+
+    String fmtTs(String raw) {
+      final dt = DateTime.tryParse(raw)?.toLocal();
+      return dt == null ? raw : DateFormat('MMM d, h:mm a').format(dt);
+    }
+
+    Future<void> refreshChat(StateSetter setModalState) async {
+      if (loading) return;
+      setModalState(() {
+        loading = true;
+        error = null;
+      });
+      try {
+        await _loadWorkflow(caseId);
+        messages = List<Map<String, dynamic>>.from(_timelineMessages);
+      } catch (e) {
+        error = 'Failed to refresh chat.';
+      } finally {
+        if (mounted) {
+          setModalState(() => loading = false);
+        }
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (scrollController.hasClients) {
+          scrollController.jumpTo(scrollController.position.maxScrollExtent);
+        }
+      });
+    }
+
+    _chatSheetOpen = true;
+    await _markChatSeen(caseId, _userRole, _timelineMessages);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useRootNavigator: false,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (scrollController.hasClients && scrollController.position.maxScrollExtent > 0) {
+                scrollController.jumpTo(scrollController.position.maxScrollExtent);
+              }
+            });
+            return FractionallySizedBox(
+              heightFactor: 0.96,
+              child: ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+                child: Material(
+                  color: const Color(0xFFF3F4F6),
+                  child: SafeArea(
+                    top: false,
+                    child: Column(
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
+                          ),
+                          child: Row(
+                            children: [
+                              IconButton(
+                                onPressed: () => Navigator.of(sheetContext).pop(),
+                                icon: const Icon(Icons.arrow_back_rounded),
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('Case Chat', style: TextStyle(fontWeight: FontWeight.w700)),
+                                    Text('Status: $_workflowStatus', style: Theme.of(context).textTheme.bodySmall),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: () => refreshChat(setModalState),
+                                icon: const Icon(Icons.refresh_rounded),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (error != null)
+                          Container(
+                            width: double.infinity,
+                            color: Colors.red.shade50,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            child: Text(error!, style: TextStyle(color: Colors.red.shade700)),
+                          ),
+                        Expanded(
+                          child: loading && messages.isEmpty
+                              ? const Center(child: CircularProgressIndicator())
+                              : messages.isEmpty
+                                  ? const Center(child: Text('No messages yet.'))
+                                  : ListView.separated(
+                                      controller: scrollController,
+                                      padding: const EdgeInsets.all(12),
+                                      itemCount: messages.length,
+                                      separatorBuilder: (context, index) => const SizedBox(height: 10),
+                                      itemBuilder: (context, index) {
+                                        final m = messages[index];
+                                        final role = (m['senderRole'] ?? 'unknown').toString();
+                                        final senderName = (m['senderName'] ?? '').toString().trim();
+                                        final body = (m['message'] ?? '').toString();
+                                        final ts = fmtTs((m['createdAt'] ?? '').toString());
+                                        final mine = role.toLowerCase() == _userRole.toLowerCase();
+                                        final label = senderName.isNotEmpty
+                                            ? '$senderName (${role.toUpperCase()})'
+                                            : role.toUpperCase();
+                                        return Row(
+                                          mainAxisAlignment: mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+                                          children: [
+                                            Flexible(
+                                              child: Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                                decoration: BoxDecoration(
+                                                  color: mine ? const Color(0xFFDCF8E7) : Colors.white,
+                                                  borderRadius: BorderRadius.circular(14),
+                                                  border: Border.all(color: const Color(0xFFE5E7EB)),
+                                                ),
+                                                child: Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF4B5563))),
+                                                    const SizedBox(height: 4),
+                                                    Text(body),
+                                                    const SizedBox(height: 6),
+                                                    Text(ts, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280))),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: messageController,
+                                  minLines: 1,
+                                  maxLines: 4,
+                                  decoration: InputDecoration(
+                                    hintText: 'Type a message...',
+                                    filled: true,
+                                    fillColor: const Color(0xFFF9FAFB),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                      borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              SizedBox(
+                                width: 132,
+                                height: 48,
+                                child: FilledButton.icon(
+                                  style: FilledButton.styleFrom(
+                                    minimumSize: const Size(132, 48),
+                                    maximumSize: const Size(132, 48),
+                                  ),
+                                  onPressed: sending
+                                      ? null
+                                      : () async {
+                                          final textMsg = messageController.text.trim();
+                                          if (textMsg.isEmpty) return;
+                                          setModalState(() => sending = true);
+                                          try {
+                                            await context.read<CaseRepository>().addCaseMessage(
+                                              caseId: caseId,
+                                              senderRole: _userRole,
+                                              senderId: _currentActorIdentity()['id'],
+                                              senderName: _currentActorIdentity()['name'],
+                                              senderEmail: _currentActorIdentity()['email'],
+                                              message: textMsg,
+                                            );
+                                            messageController.clear();
+                                            await refreshChat(setModalState);
+                                          } on ApiException catch (e) {
+                                            if (mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+                                            }
+                                          } finally {
+                                            if (mounted) setModalState(() => sending = false);
+                                          }
+                                        },
+                                  icon: const Icon(Icons.send_rounded),
+                                  label: Text(sending ? 'Sending' : 'Send'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    _chatSheetOpen = false;
+    messageController.dispose();
+    scrollController.dispose();
+    if (mounted) {
+      await _markChatSeen(caseId, _userRole, _timelineMessages);
+      await _loadWorkflow(caseId);
+    }
+  }
+
+  Future<void> _transferCaseToVet(String caseId) async {
+    if (!_currentVetOwnsCase()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only the assigned vet can transfer this case.')),
+      );
+      return;
+    }
+    final currentVet = _assignedVetParticipant();
+    final newVetEmailController = TextEditingController();
+    final newVetNameController = TextEditingController();
+    final reasonController = TextEditingController();
+    final messageController = TextEditingController(
+      text: 'Transferring case to another vet for continued handling.',
+    );
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Transfer Case to Another Vet'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Current assigned vet: ${_participantLabel(currentVet, empty: 'Unassigned')}',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: newVetNameController,
+                  decoration: const InputDecoration(labelText: 'New vet name (optional)'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: newVetEmailController,
+                  decoration: const InputDecoration(labelText: 'New vet email'),
+                  keyboardType: TextInputType.emailAddress,
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: reasonController,
+                  minLines: 2,
+                  maxLines: 3,
+                  decoration: const InputDecoration(labelText: 'Transfer reason'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: messageController,
+                  minLines: 2,
+                  maxLines: 3,
+                  decoration: const InputDecoration(labelText: 'Message to new vet (optional)'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Transfer')),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      final newVetEmail = newVetEmailController.text.trim();
+      if (newVetEmail.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('New vet email is required for transfer.')),
+        );
+        return;
+      }
+      setState(() => _isActionLoading = true);
+      await context.read<CaseRepository>().transferCaseToVet(
+        caseId: caseId,
+        senderId: _currentActorIdentity()['id'],
+        senderName: _currentActorIdentity()['name'],
+        senderEmail: _currentActorIdentity()['email'],
+        newVetEmail: newVetEmail,
+        newVetName: newVetNameController.text.trim(),
+        reason: reasonController.text.trim(),
+        message: messageController.text.trim(),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Case transferred to another vet.')),
+        );
+      }
+      await _loadWorkflow(caseId);
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      newVetEmailController.dispose();
+      newVetNameController.dispose();
+      reasonController.dispose();
+      messageController.dispose();
+      if (mounted) {
+        setState(() => _isActionLoading = false);
+      }
+    }
+  }
+
+  Future<void> _acknowledgeCase(String caseId, String status) async {
+    setState(() => _isActionLoading = true);
+    try {
+      await context.read<CaseRepository>().acknowledgeCase(
+        caseId: caseId,
+        status: status,
+        senderRole: _userRole,
+        senderId: _currentActorIdentity()['id'],
+        senderName: _currentActorIdentity()['name'],
+        senderEmail: _currentActorIdentity()['email'],
+        notes: _notesController.text.trim(),
+      );
+      await _loadWorkflow(caseId);
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isActionLoading = false);
+      }
+    }
+  }
+
+  Future<void> _closeCase(String caseId) async {
+    final outcome = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Close Case'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'recovered'),
+            child: const Text('Recovered'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'improved'),
+            child: const Text('Improved'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'worsened'),
+            child: const Text('Worsened'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'deceased'),
+            child: const Text('Deceased'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || outcome == null) {
+      return;
+    }
+    final caseBloc = context.read<CaseBloc>();
+    setState(() => _isActionLoading = true);
+    try {
+      await context.read<CaseRepository>().closeCase(
+        caseId: caseId,
+        outcome: outcome,
+        senderRole: _userRole,
+        senderId: _currentActorIdentity()['id'],
+        senderName: _currentActorIdentity()['name'],
+        senderEmail: _currentActorIdentity()['email'],
+        notes: _notesController.text.trim(),
+      );
+      await _loadWorkflow(caseId);
+      caseBloc.add(CaseOpenedById(caseId));
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isActionLoading = false);
+      }
+    }
+  }
+
+  Future<void> _pickFollowUpDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(days: 3)),
+      firstDate: now.subtract(const Duration(days: 30)),
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (picked != null && mounted) {
+      _followUpDateController.text = picked.toIso8601String().split('T').first;
+      setState(() {});
+    }
+  }
+
+  List<String> _caseImagePaths(CaseRecord item) {
+    final seen = <String>{};
+    final out = <String>[];
+    if (item.imagePath != null && item.imagePath!.trim().isNotEmpty) {
+      final p = item.imagePath!.trim();
+      if (seen.add(p)) out.add(p);
+    }
+    for (final p in item.attachments) {
+      final s = p.trim();
+      if (s.isEmpty) {
+        continue;
+      }
+      if (seen.add(s)) {
+        out.add(s);
+      }
+    }
+    return out;
+  }
+
+  Future<void> _confirmDelete(String caseId) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Delete case?'),
+          content: const Text(
+            'This removes the case from local history. This action cannot be undone.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!mounted || shouldDelete != true) {
+      return;
+    }
+
+    context.read<CaseBloc>().add(CaseDeleted(caseId));
+    context.go('/app/history');
+  }
+
+  Future<void> _exportSummary(String caseId) async {
+    if (_isExporting) {
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      final repository = context.read<CaseRepository>();
+      final settingsRepository = context.read<SettingsRepository>();
+      final payload = await repository.exportCaseSummary(caseId);
+      final summary = payload['summaryText']?.toString() ?? 'No summary available.';
+      final subject = 'Livestock case summary: $caseId';
+      final settings = await settingsRepository.load();
+      final vetEmail = settings.vetEmail.trim();
+      if (!mounted) {
+        return;
+      }
+      final messenger = ScaffoldMessenger.of(context);
+      await showDialog<void>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Case Summary'),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+                child: SelectableText(summary),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: summary));
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('Summary copied to clipboard.')),
+                  );
+                },
+                child: const Text('Copy'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  if (vetEmail.isEmpty && mounted) {
+                    messenger.showSnackBar(
+                      const SnackBar(
+                        content: Text('Vet email not set. Add it in Settings for one-tap send.'),
+                      ),
+                    );
+                  }
+                  final uri = Uri(
+                    scheme: 'mailto',
+                    path: vetEmail,
+                    queryParameters: {
+                      'subject': subject,
+                      'body': summary,
+                    },
+                  ).toString();
+                  final ok = await launchUrlString(uri);
+                  if (!ok && mounted) {
+                    messenger.showSnackBar(
+                      const SnackBar(content: Text('Unable to open email app on this device.')),
+                    );
+                  }
+                },
+                child: const Text('Email Vet'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          );
+        },
+      );
+    } on ApiException catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to export case summary.')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isExporting = false);
+      }
+    }
+  }
+
+  String _sectionLabel(_CaseDetailSection section) {
+    switch (section) {
+      case _CaseDetailSection.overview:
+        return 'Overview';
+      case _CaseDetailSection.evidence:
+        return 'Evidence';
+      case _CaseDetailSection.notes:
+        return 'Notes';
+      case _CaseDetailSection.workflow:
+        return 'Workflow';
+    }
+  }
+
+  IconData _sectionIcon(_CaseDetailSection section) {
+    switch (section) {
+      case _CaseDetailSection.overview:
+        return Icons.dashboard_outlined;
+      case _CaseDetailSection.evidence:
+        return Icons.fact_check_outlined;
+      case _CaseDetailSection.notes:
+        return Icons.note_alt_outlined;
+      case _CaseDetailSection.workflow:
+        return Icons.account_tree_outlined;
+    }
+  }
+
+  Widget _buildSectionSwitcher(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Sections',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _CaseDetailSection.values.map((section) {
+                final selected = _detailSection == section;
+                return ChoiceChip(
+                  selected: selected,
+                  label: Text(_sectionLabel(section)),
+                  avatar: Icon(
+                    _sectionIcon(section),
+                    size: 16,
+                    color: selected ? Theme.of(context).colorScheme.onPrimaryContainer : null,
+                  ),
+                  onSelected: (_) => setState(() => _detailSection = section),
+                );
+              }).toList(growable: false),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOverviewCard(BuildContext context, CaseRecord item) {
+    final prediction = item.prediction ?? 'Pending prediction';
+    final confidence = item.confidence;
+    final method = item.method ?? 'n/a';
+    final evidenceQuality = item.predictionJson?['evidence_quality']?.toString();
+    final activeSymptoms = item.symptoms.values.where((v) => v).length;
+    final imageCount = _caseImagePaths(item).length;
+    final topRecommendations = item.recommendations.take(3).toList(growable: false);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Case Overview',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                Chip(label: Text('Prediction: $prediction')),
+                Chip(label: Text('Urgency: ${item.urgency}')),
+                Chip(label: Text('Follow-up: ${item.followUpStatus.label}')),
+                if (confidence != null) Chip(label: Text('Confidence: ${(confidence * 100).round()}%')),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Method: $method'),
+                  if (evidenceQuality != null && evidenceQuality.trim().isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text('Evidence quality: $evidenceQuality'),
+                  ],
+                  const SizedBox(height: 4),
+                  Text('Active symptoms: $activeSymptoms / ${item.symptoms.length}'),
+                  const SizedBox(height: 4),
+                  Text('Images attached: $imageCount'),
+                  const SizedBox(height: 4),
+                  Text('CHW / User: ${item.chwOwnerLabel}'),
+                  const SizedBox(height: 4),
+                  Text('Assigned Vet: ${item.assignedVetLabel}'),
+                ],
+              ),
+            ),
+            if (topRecommendations.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(
+                'Top Recommendations',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 6),
+              ...topRecommendations.map(
+                (rec) => Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text('- $rec'),
+                ),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => setState(() => _detailSection = _CaseDetailSection.evidence),
+                  icon: const Icon(Icons.image_outlined),
+                  label: const Text('Open Evidence'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => setState(() => _detailSection = _CaseDetailSection.workflow),
+                  icon: const Icon(Icons.account_tree_outlined),
+                  label: const Text('Open Workflow'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocListener<CaseBloc, CaseState>(
+      listenWhen: (previous, current) =>
+          previous.infoMessage != current.infoMessage ||
+          previous.errorMessage != current.errorMessage,
+      listener: (context, state) {
+        final messenger = ScaffoldMessenger.of(context);
+        if (state.infoMessage != null) {
+          messenger.showSnackBar(SnackBar(content: Text(state.infoMessage!)));
+          context.read<CaseBloc>().add(const CaseFeedbackCleared());
+        } else if (state.errorMessage != null) {
+          messenger.showSnackBar(SnackBar(content: Text(state.errorMessage!)));
+          context.read<CaseBloc>().add(const CaseFeedbackCleared());
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Case Details')),
+        body: BlocBuilder<CaseBloc, CaseState>(
+          builder: (context, state) {
+            final item = state.selectedCase;
+            if (item == null || item.id != widget.caseId) {
+              if (!state.isLoading) {
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.find_in_page_outlined, size: 48),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'This case is no longer available.',
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: () => context.go('/app/history'),
+                          child: const Text('Go to History'),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            if (_boundCaseId != item.id) {
+              _boundCaseId = item.id;
+              _notesController.text = item.notes ?? '';
+              WidgetsBinding.instance.addPostFrameCallback((_) => _loadWorkflow(item.id));
+            }
+
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${item.animalLabel} - ${item.id}',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            StatusChip(status: item.status),
+                            const SizedBox(width: 10),
+                            Text(DateFormat('MMM d, h:mm a').format(item.createdAt)),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<FollowUpStatus>(
+                          key: ValueKey('${item.id}-${item.followUpStatus.name}'),
+                          initialValue: item.followUpStatus,
+                          decoration: const InputDecoration(
+                            labelText: 'Follow-up status',
+                            prefixIcon: Icon(Icons.health_and_safety_outlined),
+                          ),
+                          items: FollowUpStatus.values
+                              .map(
+                                (status) => DropdownMenuItem(
+                                  value: status,
+                                  child: Text(status.label),
+                                ),
+                              )
+                              .toList(growable: false),
+                          onChanged: (value) {
+                            if (value == null) {
+                              return;
+                            }
+                            context.read<CaseBloc>().add(
+                              CaseFollowUpStatusChanged(
+                                caseId: item.id,
+                                followUpStatus: value,
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _buildSectionSwitcher(context),
+                const SizedBox(height: 12),
+                if (_detailSection == _CaseDetailSection.overview) ...[
+                  _buildOverviewCard(context, item),
+                  const SizedBox(height: 12),
+                ],
+                if (_detailSection == _CaseDetailSection.evidence) ...[
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Symptoms',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        ...item.symptoms.entries.map((entry) {
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Text(
+                              '${entry.key.replaceAll('_', ' ')}: ${entry.value ? 'Yes' : 'No'}',
+                            ),
+                          );
+                        }),
+                        if (item.temperature != null)
+                          Text('Temperature: ${item.temperature!.toStringAsFixed(1)} deg C'),
+                        if (item.severity != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text('Severity: ${(item.severity! * 100).round()}%'),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ],
+                if (_detailSection == _CaseDetailSection.notes) ...[
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Image',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        if (_caseImagePaths(item).isEmpty)
+                          const Text('No image attached')
+                        else
+                          SizedBox(
+                            height: 140,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: _caseImagePaths(item).length,
+                              separatorBuilder: (_, index) => const SizedBox(width: 8),
+                              itemBuilder: (context, index) {
+                                final path = _caseImagePaths(item)[index];
+                                return SizedBox(
+                                  width: 160,
+                                  child: FutureBuilder<Uint8List>(
+                                    future: XFile(path).readAsBytes(),
+                                    builder: (context, snapshot) {
+                                      if (!snapshot.hasData) {
+                                        return const Center(child: CircularProgressIndicator());
+                                      }
+                                      return ClipRRect(
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: Image.memory(snapshot.data!, fit: BoxFit.cover),
+                                      );
+                                    },
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        if (_caseImagePaths(item).length > 1)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text('${_caseImagePaths(item).length} images attached'),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ],
+                if (_detailSection == _CaseDetailSection.workflow) ...[
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Notes',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _notesController,
+                          minLines: 3,
+                          maxLines: 5,
+                          decoration: const InputDecoration(
+                            labelText: 'Field notes',
+                            prefixIcon: Icon(Icons.note_alt_outlined),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: FilledButton.tonalIcon(
+                            onPressed: () => context.read<CaseBloc>().add(
+                              CaseNotesSaved(
+                                caseId: item.id,
+                                notes: _notesController.text,
+                              ),
+                            ),
+                            icon: const Icon(Icons.save_outlined),
+                            label: const Text('Save Notes'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'CHW-Vet Workflow',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            Chip(label: Text('Role: ${_userRole.toUpperCase()}')),
+                            Chip(label: Text('Status: $_workflowStatus')),
+                            if (_isTimelineLoading) const Chip(label: Text('Loading timeline...')),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Builder(
+                          builder: (context) {
+                            final participants = _workflowParticipants;
+                            final chw = participants['chwOwner'] is Map
+                                ? Map<String, dynamic>.from(participants['chwOwner'] as Map)
+                                : <String, dynamic>{};
+                            final vet = participants['assignedVet'] is Map
+                                ? Map<String, dynamic>.from(participants['assignedVet'] as Map)
+                                : <String, dynamic>{};
+                            final chwLabel = _participantLabel(chw, empty: 'Unknown CHW');
+                            final vetLabel = _participantLabel(vet, empty: 'Unassigned vet');
+                            return Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF8FAFC),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFFE5E7EB)),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Participants',
+                                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text('CHW / User: $chwLabel'),
+                                  const SizedBox(height: 4),
+                                  Text('Assigned Vet: $vetLabel'),
+                                  const SizedBox(height: 6),
+                                  const Text(
+                                    'Standard workflow: one case should have one assigned vet. Use transfer to reassign when needed.',
+                                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 10),
+                        if (_userRole == 'vet') ...[
+                          if (_hasAssignedVet() && !_currentVetOwnsCase()) ...[
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFF7ED),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFFFED7AA)),
+                              ),
+                              child: Text(
+                                'This case is assigned to ${_participantLabel(_assignedVetParticipant(), empty: 'another vet')}. '
+                                'You can view the case, but only the assigned vet can chat, review, transfer, or close it.',
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                          ],
+                          TextField(
+                            controller: _assessmentController,
+                            decoration: const InputDecoration(labelText: 'Assessment (suspected/confirmed/ruled_out)'),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _planController,
+                            decoration: const InputDecoration(labelText: 'Plan (monitor/isolate/lab_test/treatment)'),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _prescriptionController,
+                            minLines: 2,
+                            maxLines: 3,
+                            decoration: const InputDecoration(labelText: 'Prescription (drug, dose, route, frequency, duration)'),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _followUpDateController,
+                            readOnly: true,
+                            onTap: _pickFollowUpDate,
+                            decoration: const InputDecoration(
+                              labelText: 'Follow-up date (YYYY-MM-DD)',
+                              suffixIcon: Icon(Icons.calendar_today_outlined),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          FilledButton.tonalIcon(
+                            onPressed: (_isActionLoading || (_hasAssignedVet() && !_currentVetOwnsCase()))
+                                ? null
+                                : () => _submitVetReview(item.id),
+                            icon: const Icon(Icons.medical_services_outlined),
+                            label: const Text('Submit Vet Review'),
+                          ),
+                          const SizedBox(height: 8),
+                          OutlinedButton.icon(
+                            onPressed: (_isActionLoading || !_currentVetOwnsCase())
+                                ? null
+                                : () => _transferCaseToVet(item.id),
+                            icon: const Icon(Icons.swap_horiz_rounded),
+                            label: const Text('Transfer to Another Vet'),
+                          ),
+                          const SizedBox(height: 8),
+                          OutlinedButton.icon(
+                            onPressed: (_isActionLoading || (_hasAssignedVet() && !_currentVetOwnsCase()))
+                                ? null
+                                : () => _closeCase(item.id),
+                            icon: const Icon(Icons.task_alt_rounded),
+                            label: const Text('Close Case'),
+                          ),
+                        ] else ...[
+                          FilledButton.icon(
+                            onPressed: _isActionLoading ? null : () => _sendToVet(item.id),
+                            icon: const Icon(Icons.forward_to_inbox_outlined),
+                            label: Text(_hasAssignedVet() ? 'Re-send to Assigned Vet' : 'Send to Vet'),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton(
+                                  onPressed: _isActionLoading ? null : () => _acknowledgeCase(item.id, 'received'),
+                                  child: const Text('Mark Received'),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: OutlinedButton(
+                                  onPressed: _isActionLoading ? null : () => _acknowledgeCase(item.id, 'drug_started'),
+                                  child: const Text('Drug Started'),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          OutlinedButton(
+                            onPressed: _isActionLoading ? null : () => _acknowledgeCase(item.id, 'unable'),
+                            child: const Text('Unable to Execute (Escalate)'),
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () => _openChatInline(item.id),
+                                icon: const Icon(Icons.forum_outlined),
+                                label: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text('Open Chat'),
+                                    if (_chatUnreadCount > 0) ...[
+                                      const SizedBox(width: 8),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.red.shade600,
+                                          borderRadius: BorderRadius.circular(999),
+                                        ),
+                                        child: Text(
+                                          _chatUnreadCount > 99 ? '99+' : '$_chatUnreadCount',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ] else if (_timelineMessages.isNotEmpty) ...[
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        '(${_timelineMessages.length})',
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        if (_timelineReviews.isNotEmpty) ...[
+                          Text(
+                            'Latest Vet Review',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 6),
+                          Builder(
+                            builder: (context) {
+                              final latest = _timelineReviews.last;
+                              final created = latest['createdAt']?.toString() ?? '';
+                              return Text(
+                                'Assessment: ${latest['assessment'] ?? '-'}\n'
+                                'Plan: ${latest['plan'] ?? '-'}\n'
+                                'Prescription: ${latest['prescription'] ?? '-'}\n'
+                                'Follow-up: ${latest['followUpDate'] ?? '-'}\n'
+                                'At: $created',
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 10),
+                        ],
+                        if (_timelineReceipts.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            'Referral & Audit Receipts',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 6),
+                          ..._timelineReceipts.reversed.take(8).map((r) {
+                            final eventType = (r['eventType'] ?? '').toString();
+                            final role = (r['recipientRole'] ?? '').toString();
+                            final email = (r['recipientEmail'] ?? '').toString();
+                            final delivery = (r['deliveryStatus'] ?? '').toString();
+                            final ts = (r['createdAt'] ?? '').toString();
+                            final target = email.isEmpty ? role : '$role ($email)';
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text('[$delivery] $eventType -> $target\n$ts'),
+                            );
+                          }),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                ],
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Case Actions',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Quick actions for syncing, reviewing results, sharing, and cleanup.',
+                          style: TextStyle(fontSize: 12.5, color: Color(0xFF6B7280)),
+                        ),
+                        const SizedBox(height: 12),
+                if (item.status == CaseStatus.pending)
+                  FilledButton.icon(
+                    onPressed: state.isSyncing
+                        ? null
+                        : () => context.read<CaseBloc>().add(
+                            CaseSyncByIdRequested(item.id),
+                          ),
+                    icon: const Icon(Icons.sync_rounded),
+                    label: Text(state.isSyncing ? 'Syncing...' : 'Sync Now'),
+                  ),
+                if (item.status == CaseStatus.pending) const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: () => context.push('/app/result/${item.id}'),
+                  icon: const Icon(Icons.analytics_outlined),
+                  label: const Text('View Result'),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: _isExporting ? null : () => _exportSummary(item.id),
+                  icon: const Icon(Icons.share_outlined),
+                  label: Text(_isExporting ? 'Exporting...' : 'Export / Share'),
+                ),
+                const SizedBox(height: 10),
+                TextButton.icon(
+                  onPressed: () => _confirmDelete(item.id),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('Delete Case'),
+                ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}

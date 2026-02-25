@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SudVet Dashboards</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <section id="authView" class="auth-screen">
+      <div class="auth-card">
+        <h1>SudVet Dashboard Login</h1>
+        <p>Sign in to access Vet and System Management dashboards.</p>
+
+        <label>
+          API Base URL
+          <input id="loginApiBaseUrl" type="text" placeholder="http://127.0.0.1:8000" />
+        </label>
+
+        <label>
+          Email
+          <input id="loginEmail" type="email" placeholder="name@example.com" />
+        </label>
+
+        <label>
+          Password
+          <input id="loginPassword" type="password" placeholder="Enter password" />
+        </label>
+
+        <label>
+          Dashboard Role
+          <select id="loginRole">
+            <option value="vet">Veterinarian</option>
+            <option value="admin">System Admin</option>
+          </select>
+        </label>
+
+        <button id="loginBtn" class="primary">Sign In</button>
+        <p id="authStatus" class="auth-status">Enter credentials to continue.</p>
+      </div>
+    </section>
+
+    <div id="dashboardShell" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>SudVet</h1>
+          <p>Operations Console</p>
+        </div>
+
+        <nav class="menu">
+          <button class="menu-item active" data-view="vet">Vet Dashboard</button>
+          <button class="menu-item" data-view="system">System Management</button>
+        </nav>
+
+        <section class="config-card">
+          <h3 id="sessionUser">Signed in as: -</h3>
+          <h3>Backend Connection</h3>
+          <label>
+            API Base URL
+            <input id="apiBaseUrl" type="text" placeholder="http://127.0.0.1:8000" />
+          </label>
+          <button id="saveConfigBtn" class="primary">Save</button>
+          <button id="refreshBtn" class="ghost">Refresh Data</button>
+          <button id="logoutBtn" class="ghost danger">Logout</button>
+          <p id="statusText" class="status">Ready.</p>
+        </section>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <h2 id="viewTitle">Vet Dashboard</h2>
+          <p id="generatedAt">Last updated: -</p>
+        </header>
+
+        <section id="vetView" class="view active">
+          <div class="kpi-grid" id="vetKpis"></div>
+
+          <div class="panel-grid">
+            <section class="panel">
+              <h3>Priority Queue</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Case</th>
+                      <th>Prediction</th>
+                      <th>Urgency</th>
+                      <th>CHW</th>
+                      <th>Assigned Vet</th>
+                    </tr>
+                  </thead>
+                  <tbody id="vetQueueBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h3>Worker Workload</h3>
+              <ul id="workerList" class="workload-list"></ul>
+            </section>
+          </div>
+        </section>
+
+        <section id="systemView" class="view">
+          <div class="kpi-grid" id="systemKpis"></div>
+
+          <div class="panel-grid">
+            <section class="panel">
+              <h3>Disease Distribution</h3>
+              <ul id="diseaseList" class="chip-list"></ul>
+            </section>
+
+            <section class="panel">
+              <h3>Platform Status</h3>
+              <ul id="platformStatus" class="status-list"></ul>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
