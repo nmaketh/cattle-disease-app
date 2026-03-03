@@ -39,6 +39,11 @@ extension CaseStatusX on CaseStatus {
         return CaseStatus.synced;
       case 'failed':
         return CaseStatus.failed;
+      case 'open':
+      case 'in_treatment':
+      case 'resolved':
+        // Shared ops backend cases are already server-backed. Treat as synced in field-app UI.
+        return CaseStatus.synced;
       case 'pending':
       default:
         return CaseStatus.pending;
@@ -172,6 +177,13 @@ class CaseRecord extends Equatable {
     this.chwOwnerEmail,
     this.assignedVetName,
     this.assignedVetEmail,
+    // Workflow lifecycle fields (populated from ops backend)
+    this.urgent = false,
+    this.triagedAt,
+    this.acceptedAt,
+    this.resolvedAt,
+    this.vetReviewJson,
+    this.rejectionReason,
   });
 
   final String id;
@@ -194,6 +206,13 @@ class CaseRecord extends Equatable {
   final String? chwOwnerEmail;
   final String? assignedVetName;
   final String? assignedVetEmail;
+  // Workflow lifecycle fields (populated from ops backend)
+  final bool urgent;
+  final DateTime? triagedAt;
+  final DateTime? acceptedAt;
+  final DateTime? resolvedAt;
+  final Map<String, dynamic>? vetReviewJson;
+  final String? rejectionReason;
 
   String get animalLabel {
     final normalizedName = animalName?.trim() ?? '';
@@ -213,7 +232,20 @@ class CaseRecord extends Equatable {
   String? get prediction => _readPredictionString('prediction');
   double? get confidence => _readPredictionDouble('confidence');
   String? get method => _readPredictionString('method');
-  String? get gradcamPath => _readPredictionString('gradcamPath');
+  String? get gradcamPath {
+    final direct = _readPredictionString('gradcamPath') ?? _readPredictionString('gradcam_path');
+    if (direct != null && direct.isNotEmpty) {
+      return direct;
+    }
+    final explain = predictionJson?['explain'];
+    if (explain is Map) {
+      final nested = (explain['gradcamPath'] ?? explain['gradcam_path'])?.toString().trim();
+      if (nested != null && nested.isNotEmpty) {
+        return nested;
+      }
+    }
+    return null;
+  }
   String? get workflowStatus {
     final raw = _readPredictionStringFromMap('workflowStatus', source: predictionJson);
     if (raw != null) {
@@ -228,6 +260,75 @@ class CaseRecord extends Equatable {
       return const [];
     }
     return raw.map((item) => item.toString()).toList(growable: false);
+  }
+
+  // ── Explainability fields (from richer prediction_json) ─────────────────  /// Probability distribution across all diseases (disease key to 0..1 score).
+  Map<String, double> get allProbabilities {
+    final raw = _explainField('probabilities') ?? predictionJson?['probabilities'];
+    if (raw is! Map) return {};
+    return raw.map((k, v) => MapEntry(
+      k.toString(),
+      v is num ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0,
+    ));
+  }  /// Ranked symptom contributions (symptom key to 0..1 score, sorted desc).
+  Map<String, double> get featureImportance {
+    final raw = _explainField('feature_importance') ?? predictionJson?['feature_importance'];
+    if (raw is! Map) return {};
+    return raw.map((k, v) => MapEntry(
+      k.toString(),
+      v is num ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0,
+    ));
+  }
+
+  /// Ranked differential diagnosis — list of {disease, display_name, score, percentage, matched_symptoms}
+  List<Map<String, dynamic>> get differential {
+    final raw = _explainField('differential') ?? predictionJson?['differential'];
+    if (raw is! List) return [];
+    return raw.whereType<Map>().map((m) {
+      return m.map((k, v) => MapEntry(k.toString(), v));
+    }).toList();
+  }
+
+  /// Clinical rule triggers that fired for this prediction
+  List<String> get ruleTriggers {
+    final raw = _explainField('rule_triggers') ?? predictionJson?['rule_triggers'];
+    if (raw is! List) return [];
+    return raw.map((e) => e.toString()).toList();
+  }
+
+  /// Natural language reasoning explanation
+  String? get reasoningText {
+    final v = _explainField('reasoning') ?? predictionJson?['reasoning'];
+    final s = v?.toString().trim();
+    return (s == null || s.isEmpty) ? null : s;
+  }
+
+  /// Temperature contextual note from backend
+  String? get temperatureNote {
+    final v = _explainField('temperature_note') ?? predictionJson?['temperature_note'];
+    final s = v?.toString().trim();
+    return (s == null || s.isEmpty) ? null : s;
+  }
+
+  /// Severity contextual note from backend
+  String? get severityNote {
+    final v = _explainField('severity_note') ?? predictionJson?['severity_note'];
+    final s = v?.toString().trim();
+    return (s == null || s.isEmpty) ? null : s;
+  }
+
+  Object? _explainField(String key) {
+    // The Flutter api_client.dart stores the full raw response under 'raw',
+    // which contains an 'explain' sub-object.
+    final raw = predictionJson?['raw'];
+    if (raw is Map) {
+      final explain = raw['explain'];
+      if (explain is Map) {
+        return explain[key];
+      }
+    }
+    // Fallback: some routes store explainability at top level of prediction_json
+    return predictionJson?[key];
   }
 
   bool get hasPrediction => prediction != null && prediction!.trim().isNotEmpty;
@@ -251,24 +352,28 @@ class CaseRecord extends Equatable {
   }
 
   String get diseaseKey {
-    final value = prediction?.trim().toLowerCase();
-    if (value == null || value.isEmpty) {
-      return 'unknown';
-    }
-    if (value.contains('normal')) {
-      return 'normal';
-    }
-    if (value.contains('lsd')) {
-      return 'lsd';
-    }
-    if (value.contains('fmd')) {
-      return 'fmd';
-    }
-    if (value.contains('ecf')) {
-      return 'ecf';
-    }
-    if (value.contains('cbpp')) {
-      return 'cbpp';
+    // Try machine-key fields first (new format: "fmd", "lsd", etc.)
+    final machineKey = (_readPredictionString('label') ??
+            _readPredictionString('final_label') ??
+            _readPredictionString('prediction'))
+        ?.trim()
+        .toLowerCase();
+
+    if (machineKey != null && machineKey.isNotEmpty) {
+      // Exact machine key match
+      if (machineKey == 'lsd') return 'lsd';
+      if (machineKey == 'fmd') return 'fmd';
+      if (machineKey == 'ecf') return 'ecf';
+      if (machineKey == 'cbpp') return 'cbpp';
+      if (machineKey == 'normal') return 'normal';
+      // Display-name fallback for records stored before the fix
+      if (machineKey.contains('lumpy')) return 'lsd';
+      if (machineKey.contains('foot') || machineKey.contains('mouth')) return 'fmd';
+      if (machineKey.contains('east coast') || machineKey.contains('theileria')) return 'ecf';
+      if (machineKey.contains('pleuropneumonia') || machineKey.contains('contagious bovine')) {
+        return 'cbpp';
+      }
+      if (machineKey.contains('normal') || machineKey.contains('no disease')) return 'normal';
     }
     return 'unknown';
   }
@@ -328,6 +433,17 @@ class CaseRecord extends Equatable {
     bool clearAssignedVetName = false,
     String? assignedVetEmail,
     bool clearAssignedVetEmail = false,
+    bool? urgent,
+    DateTime? triagedAt,
+    bool clearTriagedAt = false,
+    DateTime? acceptedAt,
+    bool clearAcceptedAt = false,
+    DateTime? resolvedAt,
+    bool clearResolvedAt = false,
+    Map<String, dynamic>? vetReviewJson,
+    bool clearVetReviewJson = false,
+    String? rejectionReason,
+    bool clearRejectionReason = false,
   }) {
     return CaseRecord(
       id: id ?? this.id,
@@ -350,6 +466,12 @@ class CaseRecord extends Equatable {
       chwOwnerEmail: clearChwOwnerEmail ? null : (chwOwnerEmail ?? this.chwOwnerEmail),
       assignedVetName: clearAssignedVetName ? null : (assignedVetName ?? this.assignedVetName),
       assignedVetEmail: clearAssignedVetEmail ? null : (assignedVetEmail ?? this.assignedVetEmail),
+      urgent: urgent ?? this.urgent,
+      triagedAt: clearTriagedAt ? null : (triagedAt ?? this.triagedAt),
+      acceptedAt: clearAcceptedAt ? null : (acceptedAt ?? this.acceptedAt),
+      resolvedAt: clearResolvedAt ? null : (resolvedAt ?? this.resolvedAt),
+      vetReviewJson: clearVetReviewJson ? null : (vetReviewJson ?? this.vetReviewJson),
+      rejectionReason: clearRejectionReason ? null : (rejectionReason ?? this.rejectionReason),
     );
   }
 
@@ -402,7 +524,8 @@ class CaseRecord extends Equatable {
       animalName: _pickString(map, preferred: 'animalName', fallback: 'animal_name'),
       animalTag: _pickString(map, preferred: 'animalTag', fallback: 'animal_tag'),
       createdAt: _parseDateTime(createdAtRaw) ?? DateTime.now(),
-      imagePath: _pickString(map, preferred: 'imagePath', fallback: 'image_path'),
+      imagePath: _pickString(map, preferred: 'imagePath', fallback: 'image_path') ??
+          _pickString(map, preferred: 'image_url', fallback: 'image_url'),
       symptoms: _decodeSymptoms(
         _pick(map, preferred: 'symptomsJson', fallback: 'symptoms_json'),
       ),
@@ -411,17 +534,27 @@ class CaseRecord extends Equatable {
       predictionJson: predictionPayload.isEmpty ? null : predictionPayload,
       status: CaseStatusX.fromDbValue(map['status'] as String?),
       followUpStatus: FollowUpStatusX.fromDbValue(
-        _pickString(map, preferred: 'followUpStatus', fallback: 'follow_up_status'),
+        _pickString(map, preferred: 'followUpStatus', fallback: 'follow_up_status') ??
+            _deriveFollowUpStatusFromCaseStatus(map['status']?.toString()),
       ),
       followUpDate: _parseDateTime(followUpDateRaw),
       notes: _normalize(map['notes'] as String?),
       syncedAt: _parseDateTime(syncedAtRaw),
       attachments: _decodeStringList(attachmentsRaw),
-      chwOwnerName: _participantField(map, 'chwOwner', 'name'),
+      chwOwnerName: _participantField(map, 'chwOwner', 'name') ??
+          _pickString(map, preferred: 'submitted_by_name', fallback: 'submitted_by_name'),
       chwOwnerEmail: _participantField(map, 'chwOwner', 'email'),
-      assignedVetName: _participantField(map, 'assignedVet', 'name'),
+      assignedVetName: _participantField(map, 'assignedVet', 'name') ??
+          _pickString(map, preferred: 'assigned_to_name', fallback: 'assigned_to_name'),
       assignedVetEmail: _participantField(map, 'assignedVet', 'email') ??
           _pickString(map, preferred: 'vetEmail', fallback: 'vet_email'),
+      // Workflow lifecycle fields from ops backend
+      urgent: map['urgent'] == true || map['urgent'].toString() == 'true',
+      triagedAt: _parseDateTime(map['triaged_at']),
+      acceptedAt: _parseDateTime(map['accepted_at']),
+      resolvedAt: _parseDateTime(map['resolved_at']),
+      vetReviewJson: _decodeJsonMap(map['vet_review_json']),
+      rejectionReason: _pickString(map, preferred: 'rejection_reason', fallback: 'rejectionReason'),
     );
   }
 
@@ -437,6 +570,19 @@ class CaseRecord extends Equatable {
       return (text == null || text.isEmpty) ? null : text;
     }
     return null;
+  }
+
+  static String? _deriveFollowUpStatusFromCaseStatus(String? status) {
+    switch ((status ?? '').trim().toLowerCase()) {
+      case 'in_treatment':
+        return 'in_treatment';
+      case 'resolved':
+        return 'recovered';
+      case 'open':
+        return 'open';
+      default:
+        return null;
+    }
   }
 
   static String? _readPredictionStringFromMap(
@@ -550,6 +696,19 @@ class CaseRecord extends Equatable {
         map['gradcam_path'] != null) {
       payload['gradcamPath'] = map['gradcam_path'].toString();
     }
+    if ((payload['gradcamPath'] == null || payload['gradcamPath'].toString().isEmpty) &&
+        payload['gradcam_path'] != null) {
+      payload['gradcamPath'] = payload['gradcam_path'].toString();
+    }
+    if (payload['gradcamPath'] == null || payload['gradcamPath'].toString().isEmpty) {
+      final explain = payload['explain'];
+      if (explain is Map) {
+        final nested = (explain['gradcamPath'] ?? explain['gradcam_path'])?.toString().trim();
+        if (nested != null && nested.isNotEmpty) {
+          payload['gradcamPath'] = nested;
+        }
+      }
+    }
 
     if (payload['recommendations'] == null && map['recommendations_json'] != null) {
       payload['recommendations'] = _decodeStringList(map['recommendations_json']);
@@ -623,6 +782,19 @@ class CaseRecord extends Equatable {
     return null;
   }
 
+  static Map<String, dynamic>? _decodeJsonMap(Object? raw) {
+    if (raw == null) return null;
+    if (raw is Map<String, dynamic>) return Map<String, dynamic>.from(raw);
+    if (raw is Map) return raw.map((k, v) => MapEntry(k.toString(), v));
+    if (raw is String && raw.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) return Map<String, dynamic>.from(decoded);
+      } catch (_) {}
+    }
+    return null;
+  }
+
   static String? _normalize(String? value) {
     if (value == null) {
       return null;
@@ -656,5 +828,11 @@ class CaseRecord extends Equatable {
     chwOwnerEmail,
     assignedVetName,
     assignedVetEmail,
+    urgent,
+    triagedAt,
+    acceptedAt,
+    resolvedAt,
+    vetReviewJson,
+    rejectionReason,
   ];
 }

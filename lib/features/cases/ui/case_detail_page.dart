@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../../core/api/api_client.dart';
+import '../../../core/api/base_url_resolver.dart';
 import '../../../widgets/status_chip.dart';
 import '../../auth/bloc/auth_bloc.dart';
 import '../../auth/bloc/auth_state.dart';
@@ -21,6 +22,52 @@ import '../data/case_repository.dart';
 import '../model/case_record.dart';
 
 enum _CaseDetailSection { overview, evidence, notes, workflow }
+
+class _AssignableVet {
+  const _AssignableVet({
+    required this.id,
+    required this.name,
+    required this.email,
+    required this.activeCaseload,
+    this.location,
+  });
+
+  final int id;
+  final String name;
+  final String email;
+  final int activeCaseload;
+  final String? location;
+
+  String get label {
+    final normalizedLocation = (location ?? '').trim();
+    if (normalizedLocation.isNotEmpty) {
+      return '$email · $normalizedLocation · $activeCaseload active';
+    }
+    return '$email · $activeCaseload active';
+  }
+
+  static _AssignableVet? fromMap(Map<String, dynamic> raw) {
+    final idRaw = raw['id'];
+    final id = idRaw is int ? idRaw : int.tryParse(idRaw?.toString() ?? '');
+    final name = (raw['name'] ?? '').toString().trim();
+    final email = (raw['email'] ?? '').toString().trim().toLowerCase();
+    final caseloadRaw = raw['active_caseload'] ?? raw['activeCaseload'] ?? 0;
+    final activeCaseload = caseloadRaw is int
+        ? caseloadRaw
+        : int.tryParse(caseloadRaw?.toString() ?? '') ?? 0;
+    final location = (raw['location'] ?? '').toString().trim();
+    if (id == null || id <= 0 || name.isEmpty || email.isEmpty) {
+      return null;
+    }
+    return _AssignableVet(
+      id: id,
+      name: name,
+      email: email,
+      activeCaseload: activeCaseload,
+      location: location.isEmpty ? null : location,
+    );
+  }
+}
 
 class CaseDetailPage extends StatefulWidget {
   const CaseDetailPage({super.key, required this.caseId});
@@ -42,6 +89,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
   bool _isTimelineLoading = false;
   bool _isActionLoading = false;
   String _workflowStatus = 'unknown';
+  String _triageStatus = 'open';
   String _userRole = 'chw';
   List<Map<String, dynamic>> _timelineMessages = const [];
   List<Map<String, dynamic>> _timelineReviews = const [];
@@ -112,6 +160,14 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
     return <String, dynamic>{};
   }
 
+  Map<String, dynamic> _requestedVetParticipant() {
+    final raw = _workflowParticipants['requestedVet'];
+    if (raw is Map) {
+      return Map<String, dynamic>.from(raw);
+    }
+    return <String, dynamic>{};
+  }
+
   bool _hasAssignedVet() {
     final vet = _assignedVetParticipant();
     return ['id', 'name', 'email'].any((k) => (vet[k] ?? '').toString().trim().isNotEmpty);
@@ -131,6 +187,29 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
     if (actorEmail.isNotEmpty && vetEmail.isNotEmpty && actorEmail == vetEmail) return true;
     if (actorName.isNotEmpty && vetName.isNotEmpty && actorName == vetName) return true;
     return false;
+  }
+
+  bool _currentVetIsRequested() {
+    if (_userRole != 'vet') return false;
+    final actor = _currentActorIdentity();
+    final requestedVet = _requestedVetParticipant();
+    final actorId = (actor['id'] ?? '').toString().trim();
+    final actorName = (actor['name'] ?? '').toString().trim().toLowerCase();
+    final actorEmail = (actor['email'] ?? '').toString().trim().toLowerCase();
+    final requestedId = (requestedVet['id'] ?? '').toString().trim();
+    final requestedName = (requestedVet['name'] ?? '').toString().trim().toLowerCase();
+    final requestedEmail = (requestedVet['email'] ?? '').toString().trim().toLowerCase();
+    if (actorId.isNotEmpty && requestedId.isNotEmpty && actorId == requestedId) return true;
+    if (actorEmail.isNotEmpty && requestedEmail.isNotEmpty && actorEmail == requestedEmail) return true;
+    if (actorName.isNotEmpty && requestedName.isNotEmpty && actorName == requestedName) return true;
+    return false;
+  }
+
+  bool _canCurrentVetClaim() {
+    if (_userRole != 'vet') return false;
+    if (_hasAssignedVet()) return false;
+    if (_triageStatus == 'escalated') return true;
+    return _currentVetIsRequested();
   }
 
   bool _isHumanChatMessage(Map<String, dynamic> msg, String role) {
@@ -229,6 +308,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
       setState(() {
         _userRole = settings.userRole;
         _workflowStatus = timeline['workflowStatus']?.toString() ?? 'unknown';
+        _triageStatus = timeline['triageStatus']?.toString() ?? 'open';
         _timelineMessages = parsedMsgs;
         _timelineReviews = parsedRevs;
         _timelineReceipts = parsedRecs;
@@ -323,108 +403,128 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
     }
   }
 
-  Future<void> _sendToVet(String caseId) async {
-    final settings = await context.read<SettingsRepository>().load();
-    if (!mounted) {
-      return;
-    }
-    final defaultVetEmail = settings.vetEmail.trim();
-    final currentParticipants = _workflowParticipants;
-    final assignedVetRaw = currentParticipants['assignedVet'];
-    final currentVet = assignedVetRaw is Map ? Map<String, dynamic>.from(assignedVetRaw) : <String, dynamic>{};
-    final assignedVetEmail = (currentVet['email'] ?? '').toString().trim();
-    final defaultVetName = (currentVet['name'] ?? '').toString().trim();
-    final alreadyAssigned = assignedVetEmail.isNotEmpty;
-    final vetEmailController = TextEditingController(text: alreadyAssigned ? assignedVetEmail : defaultVetEmail);
-    final vetNameController = TextEditingController(text: defaultVetName);
-    final msgController = TextEditingController(
-      text: alreadyAssigned ? 'Case follow-up update sent to assigned vet.' : 'Case referred to vet for review.',
-    );
-    final notesController = TextEditingController(text: _notesController.text.trim());
+  Future<List<_AssignableVet>> _fetchAssignableVets() async {
+    final rows = await context.read<CaseRepository>().getAssignableVets();
+    final vets = rows
+        .map(_AssignableVet.fromMap)
+        .whereType<_AssignableVet>()
+        .toList(growable: false);
+    vets.sort((a, b) {
+      final byLoad = a.activeCaseload.compareTo(b.activeCaseload);
+      if (byLoad != 0) return byLoad;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return vets;
+  }
+
+  Future<_AssignableVet?> _pickVetDialog(List<_AssignableVet> vets) async {
+    final searchController = TextEditingController();
+    var filtered = List<_AssignableVet>.from(vets);
     try {
-      final confirmed = await showDialog<bool>(
+      return await showDialog<_AssignableVet>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Send to Vet'),
-          content: SizedBox(
-            width: 520,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: vetNameController,
-                  readOnly: alreadyAssigned,
-                  decoration: InputDecoration(
-                    labelText: 'Vet name ${alreadyAssigned ? '(locked)' : '(optional)'}',
-                    helperText: alreadyAssigned
-                        ? 'Case already assigned. CHW can re-send updates to this vet only.'
-                        : null,
-                  ),
+        builder: (context) => StatefulBuilder(
+          builder: (context, setModalState) {
+            void applyFilter(String query) {
+              final q = query.trim().toLowerCase();
+              setModalState(() {
+                if (q.isEmpty) {
+                  filtered = List<_AssignableVet>.from(vets);
+                } else {
+                  filtered = vets.where((v) {
+                    return v.name.toLowerCase().contains(q) ||
+                        v.email.toLowerCase().contains(q) ||
+                        (v.location ?? '').toLowerCase().contains(q);
+                  }).toList(growable: false);
+                }
+              });
+            }
+
+            return AlertDialog(
+              title: const Text('Request Specific Vet'),
+              content: SizedBox(
+                width: 560,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: searchController,
+                      onChanged: applyFilter,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.search_rounded),
+                        hintText: 'Search by name, email, or location',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 320,
+                      child: filtered.isEmpty
+                          ? const Center(child: Text('No vets match your search.'))
+                          : ListView.separated(
+                              itemCount: filtered.length,
+                              separatorBuilder: (_, _) => const Divider(height: 1),
+                              itemBuilder: (context, index) {
+                                final vet = filtered[index];
+                                return ListTile(
+                                  dense: true,
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                                  title: Text(vet.name),
+                                  subtitle: Text(vet.label),
+                                  trailing: const Icon(Icons.chevron_right_rounded),
+                                  onTap: () => Navigator.of(context).pop(vet),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: vetEmailController,
-                  readOnly: alreadyAssigned,
-                  decoration: InputDecoration(
-                    labelText: 'Vet email${alreadyAssigned ? ' (locked)' : ''}',
-                    helperText: alreadyAssigned
-                        ? 'To change vets, the assigned vet must transfer the case.'
-                        : null,
-                  ),
-                  keyboardType: TextInputType.emailAddress,
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: msgController,
-                  decoration: const InputDecoration(labelText: 'Referral message'),
-                  minLines: 2,
-                  maxLines: 3,
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: notesController,
-                  decoration: const InputDecoration(labelText: 'Notes (optional)'),
-                  minLines: 2,
-                  maxLines: 3,
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
                 ),
               ],
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: Text(alreadyAssigned ? 'Re-send' : 'Send'),
-            ),
-          ],
+            );
+          },
         ),
       );
-      if (confirmed != true || !mounted) {
-        return;
-      }
-      final email = vetEmailController.text.trim();
-      if (email.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Vet email is required to send referral.')),
-        );
-        return;
-      }
-      setState(() => _isActionLoading = true);
-      await context.read<CaseRepository>().sendCaseToVet(
-        caseId: caseId,
-        senderRole: _userRole,
-        senderId: _currentActorIdentity()['id'],
-        senderName: _currentActorIdentity()['name'],
-        senderEmail: _currentActorIdentity()['email'],
-        vetEmail: email,
-        vetName: vetNameController.text.trim(),
-        message: msgController.text.trim(),
-        notes: notesController.text.trim(),
-      );
-      _notesController.text = notesController.text.trim();
+    } finally {
+      searchController.dispose();
+    }
+  }
+
+  Future<void> _allowAnyVetAssignment(String caseId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Allow Vet Assignment'),
+        content: const Text('This will send the case to the shared vet queue so any available vet can claim it.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.groups_outlined, size: 16),
+            label: const Text('Allow Assignment'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isActionLoading = true);
+    try {
+      await context.read<CaseRepository>().escalateCase(
+            caseId,
+            allowAssignment: true,
+            requestNote: 'CAHW allowed assignment to available vet',
+          );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Referral sent to vet.')),
+          const SnackBar(content: Text('Case is now in the shared vet queue.')),
         );
       }
       await _loadWorkflow(caseId);
@@ -433,24 +533,94 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
       }
     } finally {
-      vetEmailController.dispose();
-      vetNameController.dispose();
-      msgController.dispose();
-      notesController.dispose();
+      if (mounted) setState(() => _isActionLoading = false);
+    }
+  }
+
+  Future<void> _requestSpecificVet(String caseId) async {
+    setState(() => _isActionLoading = true);
+    List<_AssignableVet> vets = const [];
+    try {
+      vets = await _fetchAssignableVets();
+    } on ApiException catch (e) {
       if (mounted) {
-        setState(() => _isActionLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
       }
+      if (mounted) setState(() => _isActionLoading = false);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _isActionLoading = false);
+
+    if (vets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No vets are available for assignment right now.')),
+      );
+      return;
+    }
+
+    final selectedVet = await _pickVetDialog(vets);
+    if (!mounted || selectedVet == null) return;
+
+    setState(() => _isActionLoading = true);
+    try {
+      await context.read<CaseRepository>().escalateCase(
+            caseId,
+            allowAssignment: false,
+            requestedVetId: selectedVet.id,
+            vetEmail: selectedVet.email,
+            requestNote: 'CAHW requested specific vet: ${selectedVet.email}',
+          );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Request sent to ${selectedVet.name}.')),
+        );
+      }
+      await _loadWorkflow(caseId);
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      if (mounted) setState(() => _isActionLoading = false);
+    }
+  }
+
+  Future<void> _claimCase(String caseId) async {
+    if (!_canCurrentVetClaim()) return;
+    final caseRepository = context.read<CaseRepository>();
+    final caseBloc = context.read<CaseBloc>();
+    setState(() => _isActionLoading = true);
+    try {
+      await caseRepository.claimCase(
+        caseId: caseId,
+        note: 'Vet accepted case from queue',
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Case accepted. You are now assigned.')),
+      );
+      caseBloc.add(CaseOpenedById(caseId));
+      await _loadWorkflow(caseId);
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      if (mounted) setState(() => _isActionLoading = false);
     }
   }
 
   Future<void> _openChatInline(String caseId) async {
-    if (_userRole == 'vet' && _hasAssignedVet() && !_currentVetOwnsCase()) {
+    if (_userRole == 'vet' && !_currentVetOwnsCase()) {
+      final hasAssignedVet = _hasAssignedVet();
       final vetLabel = _participantLabel(_assignedVetParticipant(), empty: 'another assigned vet');
+      final message = hasAssignedVet
+          ? 'Chat is restricted to the assigned vet ($vetLabel). Transfer is required before continuing this case.'
+          : 'Accept this case first before opening chat.';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Chat is restricted to the assigned vet ($vetLabel). Transfer is required before continuing this case.',
-          ),
+          content: Text(message),
         ),
       );
       return;
@@ -492,6 +662,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
 
     _chatSheetOpen = true;
     await _markChatSeen(caseId, _userRole, _timelineMessages);
+    if (!mounted) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -652,9 +823,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                                             messageController.clear();
                                             await refreshChat(setModalState);
                                           } on ApiException catch (e) {
-                                            if (mounted) {
-                                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
-                                            }
+                                            setModalState(() => error = e.message);
                                           } finally {
                                             if (mounted) setModalState(() => sending = false);
                                           }
@@ -784,30 +953,6 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
       newVetNameController.dispose();
       reasonController.dispose();
       messageController.dispose();
-      if (mounted) {
-        setState(() => _isActionLoading = false);
-      }
-    }
-  }
-
-  Future<void> _acknowledgeCase(String caseId, String status) async {
-    setState(() => _isActionLoading = true);
-    try {
-      await context.read<CaseRepository>().acknowledgeCase(
-        caseId: caseId,
-        status: status,
-        senderRole: _userRole,
-        senderId: _currentActorIdentity()['id'],
-        senderName: _currentActorIdentity()['name'],
-        senderEmail: _currentActorIdentity()['email'],
-        notes: _notesController.text.trim(),
-      );
-      await _loadWorkflow(caseId);
-    } on ApiException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
-      }
-    } finally {
       if (mounted) {
         setState(() => _isActionLoading = false);
       }
@@ -1362,18 +1507,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                                 final path = _caseImagePaths(item)[index];
                                 return SizedBox(
                                   width: 160,
-                                  child: FutureBuilder<Uint8List>(
-                                    future: XFile(path).readAsBytes(),
-                                    builder: (context, snapshot) {
-                                      if (!snapshot.hasData) {
-                                        return const Center(child: CircularProgressIndicator());
-                                      }
-                                      return ClipRRect(
-                                        borderRadius: BorderRadius.circular(12),
-                                        child: Image.memory(snapshot.data!, fit: BoxFit.cover),
-                                      );
-                                    },
-                                  ),
+                                  child: _CaseImageTile(path: path),
                                 );
                               },
                             ),
@@ -1463,8 +1597,12 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                             final vet = participants['assignedVet'] is Map
                                 ? Map<String, dynamic>.from(participants['assignedVet'] as Map)
                                 : <String, dynamic>{};
+                            final requestedVet = participants['requestedVet'] is Map
+                                ? Map<String, dynamic>.from(participants['requestedVet'] as Map)
+                                : <String, dynamic>{};
                             final chwLabel = _participantLabel(chw, empty: 'Unknown CHW');
                             final vetLabel = _participantLabel(vet, empty: 'Unassigned vet');
+                            final requestedVetLabel = _participantLabel(requestedVet, empty: 'Not requested');
                             return Container(
                               width: double.infinity,
                               padding: const EdgeInsets.all(10),
@@ -1486,6 +1624,8 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                                   Text('CHW / User: $chwLabel'),
                                   const SizedBox(height: 4),
                                   Text('Assigned Vet: $vetLabel'),
+                                  const SizedBox(height: 4),
+                                  Text('Requested Vet: $requestedVetLabel'),
                                   const SizedBox(height: 6),
                                   const Text(
                                     'Standard workflow: one case should have one assigned vet. Use transfer to reassign when needed.',
@@ -1511,6 +1651,26 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                                 'This case is assigned to ${_participantLabel(_assignedVetParticipant(), empty: 'another vet')}. '
                                 'You can view the case, but only the assigned vet can chat, review, transfer, or close it.',
                               ),
+                            ),
+                            const SizedBox(height: 8),
+                          ] else if (_canCurrentVetClaim()) ...[
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFEAF2FF),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFFBFDBFE)),
+                              ),
+                              child: const Text(
+                                'This case is available for you to accept. Claim it before adding review notes or closing it.',
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            FilledButton.icon(
+                              onPressed: _isActionLoading ? null : () => _claimCase(item.id),
+                              icon: const Icon(Icons.assignment_ind_outlined),
+                              label: const Text('Accept Case'),
                             ),
                             const SizedBox(height: 8),
                           ],
@@ -1542,7 +1702,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                           ),
                           const SizedBox(height: 8),
                           FilledButton.tonalIcon(
-                            onPressed: (_isActionLoading || (_hasAssignedVet() && !_currentVetOwnsCase()))
+                            onPressed: (_isActionLoading || !_currentVetOwnsCase())
                                 ? null
                                 : () => _submitVetReview(item.id),
                             icon: const Icon(Icons.medical_services_outlined),
@@ -1558,48 +1718,61 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                           ),
                           const SizedBox(height: 8),
                           OutlinedButton.icon(
-                            onPressed: (_isActionLoading || (_hasAssignedVet() && !_currentVetOwnsCase()))
+                            onPressed: (_isActionLoading || !_currentVetOwnsCase())
                                 ? null
                                 : () => _closeCase(item.id),
                             icon: const Icon(Icons.task_alt_rounded),
                             label: const Text('Close Case'),
                           ),
                         ] else ...[
+                          _TriageStatusBanner(
+                            triageStatus: _triageStatus,
+                            assignedVetLabel: item.assignedVetLabel,
+                            requestedVetLabel: _participantLabel(
+                              _requestedVetParticipant(),
+                              empty: '',
+                            ),
+                          ),
+                          const SizedBox(height: 8),
                           FilledButton.icon(
-                            onPressed: _isActionLoading ? null : () => _sendToVet(item.id),
-                            icon: const Icon(Icons.forward_to_inbox_outlined),
-                            label: Text(_hasAssignedVet() ? 'Re-send to Assigned Vet' : 'Send to Vet'),
+                            onPressed: _isActionLoading
+                                ? null
+                                : () => _allowAnyVetAssignment(item.id),
+                            icon: const Icon(Icons.groups_outlined),
+                            label: const Text('Allow Assignment (Any Vet)'),
                           ),
                           const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton(
-                                  onPressed: _isActionLoading ? null : () => _acknowledgeCase(item.id, 'received'),
-                                  child: const Text('Mark Received'),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: OutlinedButton(
-                                  onPressed: _isActionLoading ? null : () => _acknowledgeCase(item.id, 'drug_started'),
-                                  child: const Text('Drug Started'),
-                                ),
-                              ),
-                            ],
+                          OutlinedButton.icon(
+                            onPressed: _isActionLoading ? null : () => _requestSpecificVet(item.id),
+                            icon: const Icon(Icons.person_search_outlined),
+                            label: const Text('Request Specific Vet'),
                           ),
-                          const SizedBox(height: 8),
-                          OutlinedButton(
-                            onPressed: _isActionLoading ? null : () => _acknowledgeCase(item.id, 'unable'),
-                            child: const Text('Unable to Execute (Escalate)'),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Choose a vet by name, email, or location.',
+                            style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                           ),
+                          if (_isActionLoading) ...[
+                            const SizedBox(height: 8),
+                            const LinearProgressIndicator(minHeight: 2),
+                          ],
+                          if (_triageStatus == 'needs_review' &&
+                              item.assignedVetLabel.trim().toLowerCase() == 'unassigned') ...[
+                            const SizedBox(height: 8),
+                            const Text(
+                              'This case is saved but hidden from the shared dashboard queue until you allow assignment or request a specific vet.',
+                              style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                            ),
+                          ],
                         ],
                         const SizedBox(height: 12),
                         Row(
                           children: [
                             Expanded(
                               child: OutlinedButton.icon(
-                                onPressed: () => _openChatInline(item.id),
+                                onPressed: (_userRole == 'vet' && !_currentVetOwnsCase())
+                                    ? null
+                                    : () => _openChatInline(item.id),
                                 icon: const Icon(Icons.forum_outlined),
                                 label: Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -1738,6 +1911,179 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
           },
         ),
       ),
+    );
+  }
+}
+
+// ── Case status banner (shown to CAHW) ───────────────────────────────────────
+
+class _TriageStatusBanner extends StatelessWidget {
+  const _TriageStatusBanner({
+    required this.triageStatus,
+    required this.assignedVetLabel,
+    this.requestedVetLabel = '',
+  });
+
+  final String triageStatus;
+  final String assignedVetLabel;
+  final String requestedVetLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    final normalizedAssigned = assignedVetLabel.trim();
+    final hasAssignedVet = normalizedAssigned.isNotEmpty && normalizedAssigned.toLowerCase() != 'unassigned';
+    final requestedVet = requestedVetLabel.trim();
+    final hasRequestedVet = requestedVet.isNotEmpty;
+    final vetName = hasAssignedVet ? normalizedAssigned : 'a vet';
+
+    final (icon, label, bgColor, fgColor) = switch (triageStatus) {
+      'new' || 'escalated' => (
+          Icons.hourglass_top_rounded,
+          'Your case is in the vet queue — a vet will pick it up shortly.',
+          isDark ? const Color(0xFF2E2200) : const Color(0xFFFFF8E1),
+          const Color(0xFFB8860B),
+        ),
+      'assigned' => (
+          Icons.verified_user_rounded,
+          'Being reviewed by $vetName. Chat below for updates.',
+          isDark ? const Color(0xFF0D2E1A) : const Color(0xFFE8F5EE),
+          const Color(0xFF2E7D4F),
+        ),
+      'needs_review' when hasAssignedVet => (
+          Icons.verified_user_rounded,
+          'Being reviewed by $vetName. Chat below for updates.',
+          isDark ? const Color(0xFF0D2E1A) : const Color(0xFFE8F5EE),
+          const Color(0xFF2E7D4F),
+        ),
+      'needs_review' when hasRequestedVet => (
+          Icons.person_search_rounded,
+          'Requested for $requestedVet. Waiting for vet acceptance.',
+          isDark ? const Color(0xFF1D263A) : const Color(0xFFEAF2FF),
+          const Color(0xFF3156A3),
+        ),
+      'needs_review' => (
+          Icons.pause_circle_outline_rounded,
+          'Case saved. Allow assignment or request a specific vet to make it visible on the dashboard.',
+          isDark ? const Color(0xFF2E2200) : const Color(0xFFFFF8E1),
+          const Color(0xFFB8860B),
+        ),
+      _ => (
+          Icons.check_circle_outline_rounded,
+          'Case submitted successfully.',
+          isDark ? const Color(0xFF1A1A2E) : const Color(0xFFF0F0F0),
+          const Color(0xFF666666),
+        ),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: fgColor.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: fgColor),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: fgColor,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Case image tile ───────────────────────────────────────────────────────────
+
+/// Displays a single case image from a local file path or a server URL.
+class _CaseImageTile extends StatelessWidget {
+  const _CaseImageTile({required this.path});
+
+  final String path;
+
+  static Widget _placeholder(BuildContext context) => Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+
+  static Widget _broken(BuildContext context) => Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(child: Icon(Icons.broken_image_outlined, size: 28)),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    // Absolute network URL or blob URL (Flutter web image_picker returns blob: URLs)
+    if (path.startsWith('http://') ||
+        path.startsWith('https://') ||
+        path.startsWith('blob:')) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.network(
+          path,
+          fit: BoxFit.cover,
+          loadingBuilder: (_, child, prog) =>
+              prog == null ? child : _placeholder(context),
+          errorBuilder: (_, _, _) => _broken(context),
+        ),
+      );
+    }
+
+    // Server-relative path (e.g. /uploads/abc.jpg) — prepend resolved base URL
+    if (path.startsWith('/')) {
+      return FutureBuilder<String>(
+        future: BaseUrlResolver.resolve(),
+        builder: (context, snap) {
+          if (!snap.hasData) return _placeholder(context);
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.network(
+              '${snap.data}$path',
+              fit: BoxFit.cover,
+              loadingBuilder: (_, child, prog) =>
+                  prog == null ? child : _placeholder(context),
+              errorBuilder: (_, _, _) => _broken(context),
+            ),
+          );
+        },
+      );
+    }
+
+    // Local file path (native platforms)
+    return FutureBuilder<Uint8List>(
+      future: XFile(path).readAsBytes(),
+      builder: (context, snap) {
+        if (snap.hasError ||
+            (snap.connectionState == ConnectionState.done && !snap.hasData)) {
+          return _broken(context);
+        }
+        if (!snap.hasData) return _placeholder(context);
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.memory(
+            snap.data!,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _broken(context),
+          ),
+        );
+      },
     );
   }
 }

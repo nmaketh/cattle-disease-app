@@ -3,27 +3,38 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../app/theme.dart';
+import '../../../core/api/base_url_resolver.dart';
+import '../../../widgets/disease_probability_bars.dart';
+import '../../../widgets/explainability_panel.dart';
 import '../../settings/data/settings_repository.dart';
-import '../../../widgets/section_card.dart';
-import '../../../widgets/status_chip.dart';
 import '../bloc/case_bloc.dart';
 import '../bloc/case_event.dart';
 import '../bloc/case_state.dart';
 import '../model/case_record.dart';
 
-const _resultWarnBg = Color(0xFFFBF1DD);
-const _resultWarnBorder = Color(0xFFE6CF99);
-const _resultWarnText = Color(0xFF6D5218);
-const _resultSoftGreen = Color(0xFFE8F1E9);
-const _resultSoftGreen2 = Color(0xFFDEEADF);
-const _resultUrgentBg = Color(0xFFF7E1DA);
-const _resultUrgentFg = Color(0xFF8A2D1F);
-const _resultMediumBg = Color(0xFFFBF1DD);
-const _resultMediumFg = Color(0xFF7A5A12);
-const _resultLowBg = Color(0xFFE4F0E6);
-const _resultLowFg = Color(0xFF225C3A);
+// ── Disease display names ─────────────────────────────────────────────────────
+
+const _diseaseDisplay = {
+  'lsd':    'Lumpy Skin Disease',
+  'fmd':    'Foot & Mouth Disease',
+  'ecf':    'East Coast Fever',
+  'cbpp':   'Contagious Bovine Pleuropneumonia',
+  'normal': 'No Disease Detected',
+};
+
+const _diseaseShort = {
+  'lsd':    'LSD',
+  'fmd':    'FMD',
+  'ecf':    'ECF',
+  'cbpp':   'CBPP',
+  'normal': 'Normal',
+};
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 class ResultPage extends StatefulWidget {
   const ResultPage({super.key, required this.caseId});
@@ -34,233 +45,205 @@ class ResultPage extends StatefulWidget {
   State<ResultPage> createState() => _ResultPageState();
 }
 
-class _ResultPageState extends State<ResultPage> {
+class _ResultPageState extends State<ResultPage>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _heroCtrl;
+  late final Animation<double> _heroFade;
+
   @override
   void initState() {
     super.initState();
+    _heroCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _heroFade = CurvedAnimation(parent: _heroCtrl, curve: Curves.easeOut);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<CaseBloc>().add(CaseOpenedById(widget.caseId));
+      _heroCtrl.forward();
     });
+  }
+
+  @override
+  void dispose() {
+    _heroCtrl.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Prediction Result')),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: BlocBuilder<CaseBloc, CaseState>(
         builder: (context, state) {
           final item = state.selectedCase;
           if (item == null || item.id != widget.caseId) {
-            if (!state.isLoading) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.find_in_page_outlined, size: 48),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'This case is no longer available.',
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 12),
-                      FilledButton(
-                        onPressed: () => context.go('/app/history'),
-                        child: const Text('Go to History'),
-                      ),
-                    ],
-                  ),
-                ),
-              );
+            if (state.isLoading) {
+              return const Center(child: CircularProgressIndicator());
             }
-            return const Center(child: CircularProgressIndicator());
+            return _NotFoundView(
+              onHistory: () => context.go('/app/history'),
+            );
           }
-
-          final confidence = item.confidence;
-          final confidencePercent = confidence == null
-              ? '--'
-              : '${(confidence * 100).toStringAsFixed(1)}%';
-          final methodType = _methodType(item);
-          final recommendations = item.recommendations.isEmpty
-              ? _defaultRecommendation(item.prediction)
-              : item.recommendations;
-          final imagePaths = _imagePaths(item);
-
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 260),
-                child: SectionCard(
-                  key: ValueKey('${item.id}-${item.prediction}-${item.status}'),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          StatusChip(status: item.status),
-                          const SizedBox(width: 8),
-                          _UrgencyChip(urgency: item.urgency),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        item.prediction ?? 'Prediction pending',
-                        style: Theme.of(context).textTheme.headlineMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      Text('Confidence: $confidencePercent'),
-                      const SizedBox(height: 4),
-                      Text('Method: ${item.method ?? 'Pending'}'),
-                      const SizedBox(height: 2),
-                      Text('Input modality: $methodType'),
-                      const SizedBox(height: 2),
-                      Text('Workflow: ${item.workflowStatus ?? 'unspecified'}'),
-                      const SizedBox(height: 12),
-                      if (confidence != null)
-                        LinearProgressIndicator(
-                          value: confidence.clamp(0, 1),
-                          minHeight: 10,
-                          borderRadius: BorderRadius.circular(999),
-                        )
-                      else
-                        const Text('Confidence will appear after sync.'),
-                      if (confidence != null && confidence < 0.70) ...[
-                        const SizedBox(height: 10),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: _resultWarnBg,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: _resultWarnBorder),
-                          ),
-                          child: const Text(
-                            'Low confidence. Retake a clearer photo in daylight and resubmit.',
-                            style: TextStyle(color: _resultWarnText, fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              if (imagePaths.isNotEmpty)
-                SectionCard(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Case Images (${imagePaths.length})',
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        height: 120,
-                        child: ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: imagePaths.length,
-                          separatorBuilder: (_, index) => const SizedBox(width: 8),
-                          itemBuilder: (context, index) {
-                            final path = imagePaths[index];
-                            return SizedBox(
-                              width: 140,
-                              child: FutureBuilder<Uint8List>(
-                                future: XFile(path).readAsBytes(),
-                                builder: (context, snapshot) {
-                                  if (!snapshot.hasData) {
-                                    return const Center(child: CircularProgressIndicator());
-                                  }
-                                  return ClipRRect(
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: Image.memory(snapshot.data!, fit: BoxFit.cover),
-                                  );
-                                },
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              if (imagePaths.isNotEmpty) const SizedBox(height: 12),
-              SectionCard(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'What to do next',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    ...recommendations.map((tip) {
-                      return CheckboxListTile(
-                        value: false,
-                        onChanged: (_) {},
-                        dense: true,
-                        controlAffinity: ListTileControlAffinity.leading,
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(tip),
-                      );
-                    }),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              SectionCard(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Explainability (Grad-CAM)',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Container(
-                      height: 170,
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(14),
-                        gradient: const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [_resultSoftGreen, _resultSoftGreen2],
-                        ),
-                        border: Border.all(color: const Color(0xFFD6DED5)),
-                      ),
-                      child: item.gradcamPath == null
-                          ? const Center(
-                              child: Text(
-                                'No explainability map available for this case yet.',
-                                textAlign: TextAlign.center,
-                              ),
-                            )
-                          : _GradCamView(path: item.gradcamPath!),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              PrimaryButtonRow(
-                onViewCase: () => context.push('/app/case/${item.id}'),
-                onNewCase: () => context.go('/app/new-case'),
-                onSync: () => context.read<CaseBloc>().add(
-                  const CasePendingSyncRequested(),
-                ),
-              ),
-            ],
+          return _ResultBody(
+            item: item,
+            heroFade: _heroFade,
+            onViewCase: () => context.push('/app/case/${item.id}'),
+            onNewCase: () => context.go('/app/new-case'),
+            onSync: () => context
+                .read<CaseBloc>()
+                .add(const CasePendingSyncRequested()),
           );
         },
       ),
+    );
+  }
+}
+
+// ── Result body ───────────────────────────────────────────────────────────────
+
+class _ResultBody extends StatelessWidget {
+  const _ResultBody({
+    required this.item,
+    required this.heroFade,
+    required this.onViewCase,
+    required this.onNewCase,
+    required this.onSync,
+  });
+
+  final CaseRecord item;
+  final Animation<double> heroFade;
+  final VoidCallback onViewCase;
+  final VoidCallback onNewCase;
+  final VoidCallback onSync;
+
+  @override
+  Widget build(BuildContext context) {
+    final dc = Theme.of(context).extension<DiseaseColors>() ?? DiseaseColors.light;
+    final diseaseKey = item.diseaseKey;
+    final accent = dc.colorFor(diseaseKey);
+    final onAccent = dc.onSurfaceFor(diseaseKey);
+    final confidence = item.confidence;
+    final probabilities = item.allProbabilities;
+    final recommendations = item.recommendations.isEmpty
+        ? _defaultRecommendations(diseaseKey)
+        : item.recommendations;
+
+    return CustomScrollView(
+      slivers: [
+        // ── Hero SliverAppBar ────────────────────────────────────────────
+        SliverAppBar(
+          expandedHeight: 210,
+          pinned: true,
+          backgroundColor: accent,
+          foregroundColor: onAccent,
+          flexibleSpace: FlexibleSpaceBar(
+            background: FadeTransition(
+              opacity: heroFade,
+              child: _HeroHeader(
+                diseaseKey: diseaseKey,
+                accent: accent,
+                onAccent: onAccent,
+                confidence: confidence,
+                status: item.status,
+                urgency: item.urgency,
+                method: item.method,
+              ),
+            ),
+          ),
+          title: Text(
+            _diseaseShort[diseaseKey] ?? 'Result',
+            style: GoogleFonts.sora(
+              fontWeight: FontWeight.w800,
+              fontSize: 17,
+              color: onAccent,
+            ),
+          ),
+        ),
+
+        // ── Content ──────────────────────────────────────────────────────
+        SliverPadding(
+          padding: const EdgeInsets.all(16),
+          sliver: SliverList(
+            delegate: SliverChildListDelegate([
+              // Low-confidence banner
+              if (confidence != null && confidence < 0.55) ...[
+                _LowConfidenceBanner(confidence: confidence),
+                const SizedBox(height: 12),
+              ],
+
+              // Probability distribution
+              if (probabilities.isNotEmpty) ...[
+                _PanelCard(
+                  title: 'Disease Probability Distribution',
+                  icon: Icons.bar_chart_rounded,
+                  child: DiseaseProbabilityBars(
+                    probabilities: probabilities,
+                    topDisease: diseaseKey,
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+
+              // Case images
+              if (_imagePaths(item).isNotEmpty) ...[
+                _PanelCard(
+                  title: 'Case Images',
+                  icon: Icons.photo_library_rounded,
+                  child: _ImagesRow(imagePaths: _imagePaths(item)),
+                ),
+                const SizedBox(height: 12),
+              ],
+
+              // AI explainability
+              ExplainabilityPanel(
+                reasoning: item.reasoningText,
+                featureImportance: item.featureImportance,
+                ruleTriggers: item.ruleTriggers,
+                differential: item.differential,
+                temperatureNote: item.temperatureNote,
+                severityNote: item.severityNote,
+              ),
+              if (item.reasoningText != null ||
+                  item.featureImportance.isNotEmpty)
+                const SizedBox(height: 12),
+
+              // Grad-CAM (if available)
+              if (item.gradcamPath != null) ...[
+                _PanelCard(
+                  title: 'Visual Saliency Map (Grad-CAM)',
+                  icon: Icons.visibility_rounded,
+                  child: _GradCamView(path: item.gradcamPath!),
+                ),
+                const SizedBox(height: 12),
+              ],
+
+              // Recommended actions
+              _PanelCard(
+                title: 'Recommended Actions',
+                icon: Icons.checklist_rounded,
+                accentBg: accent.withValues(alpha: 0.08),
+                accentBorder: onAccent.withValues(alpha: 0.18),
+                child: _RecommendationsList(
+                  items: recommendations,
+                  accentColor: accent,
+                  checkColor: onAccent,
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Action buttons
+              _ActionButtons(
+                status: item.status,
+                onViewCase: onViewCase,
+                onNewCase: onNewCase,
+                onSync: onSync,
+              ),
+              const SizedBox(height: 32),
+            ]),
+          ),
+        ),
+      ],
     );
   }
 
@@ -268,168 +251,548 @@ class _ResultPageState extends State<ResultPage> {
     final out = <String>[];
     final seen = <String>{};
     if (item.imagePath != null && item.imagePath!.trim().isNotEmpty) {
-      final p = item.imagePath!.trim();
-      if (seen.add(p)) {
-        out.add(p);
-      }
+      if (seen.add(item.imagePath!.trim())) out.add(item.imagePath!.trim());
     }
     for (final p in item.attachments) {
       final s = p.trim();
-      if (s.isNotEmpty && seen.add(s)) {
-        out.add(s);
-      }
+      if (s.isNotEmpty && seen.add(s)) out.add(s);
     }
     return out;
   }
 
-  String _methodType(CaseRecord item) {
-    final method = (item.method ?? '').toLowerCase();
-    if (method.isNotEmpty && method != 'pending') {
-      return method;
+  List<String> _defaultRecommendations(String key) {
+    switch (key) {
+      case 'lsd':
+        return [
+          'Isolate the affected animal immediately',
+          'Clean and disinfect shared areas',
+          'Contact veterinarian for confirmatory diagnosis',
+          'Monitor herd for new skin lesions',
+        ];
+      case 'fmd':
+        return [
+          'Restrict all herd movement immediately',
+          'Notify animal health authority — FMD is notifiable',
+          'Provide soft feed and clean water',
+          'Do not move animals off-farm',
+        ];
+      case 'ecf':
+        return [
+          'Contact veterinarian urgently — ECF can be fatal',
+          'Control ticks with approved acaricide',
+          'Isolate and shade affected animals',
+          'Do not stress the animal further',
+        ];
+      case 'cbpp':
+        return [
+          'Isolate affected animal from herd',
+          'Report to local animal health authority',
+          'Vaccinate healthy herd',
+          'Improve housing ventilation',
+        ];
+      default:
+        return [
+          'Continue daily health observation',
+          'Maintain vaccination schedule',
+          'Resubmit case if symptoms develop',
+        ];
     }
-    final hasImage = item.imagePath != null && item.imagePath!.trim().isNotEmpty;
-    final symptomCount = item.symptoms.values.where((value) => value).length;
-    if (hasImage && symptomCount > 0) {
-      return 'hybrid';
-    }
-    if (hasImage) {
-      return 'image';
-    }
-    return 'symptoms';
-  }
-
-  List<String> _defaultRecommendation(String? prediction) {
-    final disease = prediction?.toLowerCase() ?? '';
-    if (disease.contains('lsd')) {
-      return const [
-        'Isolate the affected animal immediately.',
-        'Clean and disinfect shared areas.',
-        'Consult a veterinarian for confirmatory diagnosis.',
-      ];
-    }
-    if (disease.contains('fmd')) {
-      return const [
-        'Reduce herd movement and contact.',
-        'Disinfect feed and water points.',
-        'Call your vet for treatment planning.',
-      ];
-    }
-    return const [
-      'Continue daily observation.',
-      'Retake photo if condition changes.',
-      'Keep prevention and vaccination records updated.',
-    ];
   }
 }
 
-class _GradCamView extends StatelessWidget {
-  const _GradCamView({required this.path});
+// ── Hero header ───────────────────────────────────────────────────────────────
 
-  final String path;
+class _HeroHeader extends StatelessWidget {
+  const _HeroHeader({
+    required this.diseaseKey,
+    required this.accent,
+    required this.onAccent,
+    required this.confidence,
+    required this.status,
+    required this.urgency,
+    required this.method,
+  });
+
+  final String diseaseKey;
+  final Color accent;
+  final Color onAccent;
+  final double? confidence;
+  final CaseStatus status;
+  final String urgency;
+  final String? method;
 
   @override
   Widget build(BuildContext context) {
-    final normalized = path.trim();
-    return FutureBuilder<String>(
-      future: _resolveGradcamUrl(context, normalized),
-      builder: (context, snapshot) {
-        final resolved = snapshot.data?.trim() ?? normalized;
-        final isRemote = resolved.startsWith('http://') || resolved.startsWith('https://');
-        if (!isRemote) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                'Grad-CAM generated on backend:\n$resolved',
-                textAlign: TextAlign.center,
+    final display = _diseaseDisplay[diseaseKey] ?? 'Unknown';
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [accent, accent.withValues(alpha: 0.70)],
+        ),
+      ),
+      padding: EdgeInsets.fromLTRB(
+        20,
+        MediaQuery.of(context).padding.top + 60,
+        20,
+        20,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Status chips row
+          Wrap(
+            spacing: 6,
+            children: [
+              _SmallChip(
+                label: status.label,
+                color: onAccent,
               ),
-            ),
-          );
-        }
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(14),
-          child: Image.network(
-            resolved,
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) {
-              return Center(
-                child: Text(
-                  'Could not load Grad-CAM image.\n$resolved',
-                  textAlign: TextAlign.center,
+              _SmallChip(
+                label: '$urgency urgency',
+                color: onAccent,
+                icon: urgency.toLowerCase() == 'high'
+                    ? Icons.warning_amber_rounded
+                    : null,
+              ),
+              if (method != null && method!.trim().isNotEmpty)
+                _SmallChip(
+                  label: method!.replaceAll('_', ' '),
+                  color: onAccent,
+                  icon: Icons.science_rounded,
                 ),
-              );
-            },
+            ],
           ),
-        );
-      },
+          const SizedBox(height: 8),
+          // Disease name
+          Text(
+            display,
+            style: GoogleFonts.sora(
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+              color: onAccent,
+              height: 1.1,
+              letterSpacing: -0.4,
+            ),
+          ),
+          const SizedBox(height: 10),
+          // Confidence
+          Row(
+            children: [
+              SizedBox(
+                width: 48,
+                height: 48,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    CircularProgressIndicator(
+                      value: 1.0,
+                      strokeWidth: 3.5,
+                      color: onAccent.withValues(alpha: 0.20),
+                    ),
+                    CircularProgressIndicator(
+                      value: (confidence ?? 0.0).clamp(0.0, 1.0),
+                      strokeWidth: 3.5,
+                      color: onAccent,
+                      strokeCap: StrokeCap.round,
+                    ),
+                    Center(
+                      child: Text(
+                        confidence != null
+                            ? '${(confidence! * 100).toStringAsFixed(0)}%'
+                            : '--',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                          color: onAccent,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      confidence != null
+                          ? 'Confidence: ${(confidence! * 100).toStringAsFixed(1)}%'
+                          : 'Confidence pending sync',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: onAccent,
+                      ),
+                    ),
+                    Text(
+                      confidence != null
+                          ? (confidence! >= 0.75
+                              ? 'High confidence — strong clinical match'
+                              : confidence! >= 0.55
+                                  ? 'Moderate — consider better photo'
+                                  : 'Low — retake photo in daylight')
+                          : 'Will appear after sync',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: onAccent.withValues(alpha: 0.75),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
-
-  Future<String> _resolveGradcamUrl(BuildContext context, String value) async {
-    if (value.startsWith('http://') || value.startsWith('https://')) {
-      return value;
-    }
-    if (!value.startsWith('/')) {
-      return value;
-    }
-    final settings = await context.read<SettingsRepository>().load();
-    final base = settings.apiBaseUrl.trim().replaceAll(RegExp(r'/$'), '');
-    if (base.isEmpty) {
-      return value;
-    }
-    return '$base$value';
-  }
 }
 
-class _UrgencyChip extends StatelessWidget {
-  const _UrgencyChip({required this.urgency});
+class _SmallChip extends StatelessWidget {
+  const _SmallChip({required this.label, required this.color, this.icon});
 
-  final String urgency;
+  final String label;
+  final Color color;
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
-    Color background;
-    Color foreground;
-    switch (urgency.toLowerCase()) {
-      case 'high':
-        background = _resultUrgentBg;
-        foreground = _resultUrgentFg;
-        break;
-      case 'medium':
-        background = _resultMediumBg;
-        foreground = _resultMediumFg;
-        break;
-      default:
-        background = _resultLowBg;
-        foreground = _resultLowFg;
-    }
-
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: background,
+        color: color.withValues(alpha: 0.18),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: foreground.withValues(alpha: 0.18)),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
-      child: Text(
-        '$urgency Urgency',
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: foreground,
-          fontWeight: FontWeight.w700,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 10, color: color),
+            const SizedBox(width: 3),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Panel card ────────────────────────────────────────────────────────────────
+
+class _PanelCard extends StatelessWidget {
+  const _PanelCard({
+    required this.title,
+    required this.icon,
+    required this.child,
+    this.accentBg,
+    this.accentBorder,
+  });
+
+  final String title;
+  final IconData icon;
+  final Widget child;
+  final Color? accentBg;
+  final Color? accentBorder;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: accentBg ?? cs.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: accentBorder ?? cs.outline.withValues(alpha: 0.20),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 15, color: cs.primary),
+              const SizedBox(width: 6),
+              Text(
+                title,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  fontSize: 12,
+                  color: cs.onSurface.withValues(alpha: 0.65),
+                  letterSpacing: 0.3,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+// ── Images row ────────────────────────────────────────────────────────────────
+
+class _ImagesRow extends StatelessWidget {
+  const _ImagesRow({required this.imagePaths});
+
+  final List<String> imagePaths;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 120,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: imagePaths.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, i) => SizedBox(
+          width: 140,
+          child: _CaseImageTile(path: imagePaths[i]),
         ),
       ),
     );
   }
 }
 
-class PrimaryButtonRow extends StatelessWidget {
-  const PrimaryButtonRow({
-    super.key,
+/// Displays a single case image from either a local file path or a server URL.
+class _CaseImageTile extends StatelessWidget {
+  const _CaseImageTile({required this.path});
+
+  final String path;
+
+  static Widget _placeholder(BuildContext context) => Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+
+  static Widget _broken(BuildContext context) => Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(child: Icon(Icons.broken_image_outlined, size: 28)),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    // Absolute network URL or blob URL (Flutter web image_picker returns blob: URLs)
+    if (path.startsWith('http://') ||
+        path.startsWith('https://') ||
+        path.startsWith('blob:')) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.network(
+          path,
+          fit: BoxFit.cover,
+          loadingBuilder: (_, child, prog) =>
+              prog == null ? child : _placeholder(context),
+          errorBuilder: (_, _, _) => _broken(context),
+        ),
+      );
+    }
+
+    // Server-relative path (e.g. /uploads/abc.jpg) — prepend resolved base URL
+    if (path.startsWith('/')) {
+      return FutureBuilder<String>(
+        future: BaseUrlResolver.resolve(),
+        builder: (context, snap) {
+          if (!snap.hasData) return _placeholder(context);
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.network(
+              '${snap.data}$path',
+              fit: BoxFit.cover,
+              loadingBuilder: (_, child, prog) =>
+                  prog == null ? child : _placeholder(context),
+              errorBuilder: (_, _, _) => _broken(context),
+            ),
+          );
+        },
+      );
+    }
+
+    // Local file path (native platforms)
+    return FutureBuilder<Uint8List>(
+      future: XFile(path).readAsBytes(),
+      builder: (context, snap) {
+        if (snap.hasError || (snap.connectionState == ConnectionState.done && !snap.hasData)) {
+          return _broken(context);
+        }
+        if (!snap.hasData) return _placeholder(context);
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.memory(
+            snap.data!,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _broken(context),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ── Recommendations ───────────────────────────────────────────────────────────
+
+class _RecommendationsList extends StatefulWidget {
+  const _RecommendationsList({
+    required this.items,
+    required this.accentColor,
+    required this.checkColor,
+  });
+
+  final List<String> items;
+  final Color accentColor;
+  final Color checkColor;
+
+  @override
+  State<_RecommendationsList> createState() => _RecommendationsListState();
+}
+
+class _RecommendationsListState extends State<_RecommendationsList> {
+  late final List<bool> _checked;
+
+  @override
+  void initState() {
+    super.initState();
+    _checked = List.filled(widget.items.length, false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      children: List.generate(widget.items.length, (i) {
+        final done = _checked[i];
+        return InkWell(
+          onTap: () => setState(() => _checked[i] = !done),
+          borderRadius: BorderRadius.circular(10),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: done
+                        ? widget.accentColor
+                        : Colors.transparent,
+                    border: Border.all(
+                      color: done
+                          ? widget.accentColor
+                          : cs.outline.withValues(alpha: 0.45),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: done
+                      ? Icon(
+                          Icons.check_rounded,
+                          size: 13,
+                          color: widget.checkColor,
+                        )
+                      : null,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    widget.items[i],
+                    style: TextStyle(
+                      fontSize: 13,
+                      height: 1.45,
+                      fontWeight: FontWeight.w600,
+                      decoration:
+                          done ? TextDecoration.lineThrough : null,
+                      color: done
+                          ? cs.onSurface.withValues(alpha: 0.40)
+                          : cs.onSurface.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }),
+    );
+  }
+}
+
+// ── Low confidence banner ─────────────────────────────────────────────────────
+
+class _LowConfidenceBanner extends StatelessWidget {
+  const _LowConfidenceBanner({required this.confidence});
+
+  final double confidence;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF3CD),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFFE6A817).withValues(alpha: 0.50),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: Color(0xFF7A5A00),
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Low confidence (${(confidence * 100).toStringAsFixed(0)}%). '
+              'Retake a clearer photo in daylight and resubmit for better accuracy.',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF7A5A00),
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Action buttons ────────────────────────────────────────────────────────────
+
+class _ActionButtons extends StatelessWidget {
+  const _ActionButtons({
+    required this.status,
     required this.onViewCase,
     required this.onNewCase,
     required this.onSync,
   });
 
+  final CaseStatus status;
   final VoidCallback onViewCase;
   final VoidCallback onNewCase;
   final VoidCallback onSync;
@@ -441,22 +804,126 @@ class PrimaryButtonRow extends StatelessWidget {
       children: [
         FilledButton.icon(
           onPressed: onViewCase,
-          icon: const Icon(Icons.info_outline_rounded),
-          label: const Text('View Case'),
+          icon: const Icon(Icons.manage_search_rounded, size: 18),
+          label: const Text('View Full Case Details'),
         ),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: onNewCase,
-          icon: const Icon(Icons.add_circle_outline_rounded),
-          label: const Text('New Case'),
+          icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
+          label: const Text('Submit New Case'),
         ),
-        const SizedBox(height: 8),
-        FilledButton.tonalIcon(
-          onPressed: onSync,
-          icon: const Icon(Icons.sync_rounded),
-          label: const Text('Sync Pending'),
-        ),
+        if (status == CaseStatus.pending) ...[
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: onSync,
+            icon: const Icon(Icons.sync_rounded, size: 18),
+            label: const Text('Sync to Server'),
+          ),
+        ],
       ],
+    );
+  }
+}
+
+// ── Grad-CAM view ─────────────────────────────────────────────────────────────
+
+class _GradCamView extends StatelessWidget {
+  const _GradCamView({required this.path});
+
+  final String path;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return FutureBuilder<String>(
+      future: _resolveUrl(context, path),
+      builder: (context, snap) {
+        final resolved = snap.data?.trim() ?? path;
+        final isRemote = resolved.startsWith('http://') ||
+            resolved.startsWith('https://');
+        if (!isRemote) {
+          return Container(
+            height: 120,
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Center(
+              child: Text(
+                'Grad-CAM map: $resolved',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 11),
+              ),
+            ),
+          );
+        }
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.network(
+            resolved,
+            height: 200,
+            width: double.infinity,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => Container(
+              height: 90,
+              color: cs.surfaceContainerHighest,
+              child: const Center(
+                child: Text('Could not load saliency map.'),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<String> _resolveUrl(BuildContext context, String value) async {
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      return value;
+    }
+    if (!value.startsWith('/')) return value;
+    final settings = await context.read<SettingsRepository>().load();
+    final base = settings.apiBaseUrl.trim().replaceAll(RegExp(r'/$'), '');
+    return base.isEmpty ? value : '$base$value';
+  }
+}
+
+// ── Not-found view ────────────────────────────────────────────────────────────
+
+class _NotFoundView extends StatelessWidget {
+  const _NotFoundView({required this.onHistory});
+
+  final VoidCallback onHistory;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.find_in_page_outlined,
+              size: 56,
+              color: cs.onSurface.withValues(alpha: 0.30),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'This case is no longer available.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyLarge,
+            ),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: onHistory,
+              child: const Text('Go to History'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

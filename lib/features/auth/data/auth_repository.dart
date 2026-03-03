@@ -17,6 +17,7 @@ class AuthRepository {
   static const _refreshTokenKey = 'auth_refresh_token';
   static const _nameKey = 'auth_user_name';
   static const _emailKey = 'auth_user_email';
+  static const _roleKey = 'auth_user_role';
 
   Future<AppUser?> restoreSession() async {
     final prefs = await SharedPreferences.getInstance();
@@ -28,7 +29,8 @@ class AuthRepository {
 
     final name = prefs.getString(_nameKey) ?? 'Farmer';
     final email = prefs.getString(_emailKey) ?? 'user@cattle.ai';
-    return AppUser(id: 'saved-user', name: name, email: email);
+    final role = prefs.getString(_roleKey) ?? '';
+    return AppUser(id: 'saved-user', name: name, email: email, role: role);
   }
 
   Future<AuthResponse> login({
@@ -145,6 +147,7 @@ class AuthRepository {
     await prefs.remove(_refreshTokenKey);
     await prefs.remove(_nameKey);
     await prefs.remove(_emailKey);
+    await prefs.remove(_roleKey);
   }
 
   Future<AppUser?> refreshSessionIfPossible() async {
@@ -166,5 +169,8 @@ class AuthRepository {
     }
     await prefs.setString(_nameKey, response.user.name);
     await prefs.setString(_emailKey, response.user.email);
+    if (response.user.role.isNotEmpty) {
+      await prefs.setString(_roleKey, response.user.role);
+    }
   }
 }

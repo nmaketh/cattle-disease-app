@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/api/api_client.dart';
 import '../core/api/backend_http_client.dart';
+import '../core/api/session_events.dart' as session;
 import '../features/animals/bloc/animal_bloc.dart';
 import '../features/animals/data/animal_repository.dart';
 import '../features/auth/bloc/auth_bloc.dart';
@@ -39,6 +42,7 @@ class _AppBootstrapState extends State<AppBootstrap> {
   late final CaseBloc _caseBloc;
 
   late final GoRouter _router;
+  StreamSubscription<void>? _sessionExpiredSub;
 
   @override
   void initState() {
@@ -66,10 +70,16 @@ class _AppBootstrapState extends State<AppBootstrap> {
     );
 
     _router = buildRouter(authBloc: _authBloc);
+
+    // Auto-logout when the backend returns a persistent 401 (expired/invalid token).
+    _sessionExpiredSub = session.onSessionExpired.listen((_) {
+      _authBloc.add(const AuthLogoutRequested());
+    });
   }
 
   @override
   void dispose() {
+    _sessionExpiredSub?.cancel();
     _router.dispose();
     _authBloc.close();
     _settingsBloc.close();

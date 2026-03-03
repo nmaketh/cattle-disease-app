@@ -95,6 +95,11 @@ class CaseRepository {
     return rows.map(_mapCase).toList(growable: false);
   }
 
+  Future<List<Map<String, dynamic>>> getAssignableVets() async {
+    await initialize();
+    return _backendClient.getAssignableVets();
+  }
+
   Future<List<CaseRecord>> getHistory({
     String query = '',
     String? animalId,
@@ -138,6 +143,7 @@ class CaseRepository {
     required List<String> attachments,
     required String? notes,
     required bool shouldAttemptSync,
+    bool allowAssignment = false,
     required String apiBaseUrl,
   }) async {
     await initialize();
@@ -157,17 +163,18 @@ class CaseRepository {
       attachments: attachments,
       notes: notes,
       shouldAttemptSync: shouldAttemptSync,
+      allowAssignment: allowAssignment,
     );
 
-    final recordJson = response['case'];
-    if (recordJson is! Map) {
+    final recordSource = response['case'] is Map ? response['case'] : response;
+    if (recordSource is! Map) {
       throw const ApiException('Invalid case payload received from backend.');
     }
-    final record = _mapCase(Map<String, dynamic>.from(recordJson));
+    final record = _mapCase(Map<String, dynamic>.from(recordSource));
 
     return CaseSubmitResult(
       record: record,
-      syncedImmediately: response['syncedImmediately'] == true,
+      syncedImmediately: response['syncedImmediately'] == true || response['case'] == null,
       warningMessage: response['warningMessage']?.toString(),
     );
   }
@@ -189,6 +196,15 @@ class CaseRepository {
   }) async {
     await initialize();
     await _backendClient.updateCaseNotes(caseId: caseId, notes: notes);
+  }
+
+  Future<CaseRecord> rejectCase({
+    required String caseId,
+    required String reason,
+  }) async {
+    await initialize();
+    final row = await _backendClient.rejectCase(caseId, reason);
+    return _mapCase(row);
   }
 
   Future<void> deleteCase(String caseId) async {
@@ -226,29 +242,31 @@ class CaseRepository {
     );
   }
 
-  Future<void> sendCaseToVet({
-    required String caseId,
-    required String senderRole,
-    String? senderId,
-    String? senderName,
-    String? senderEmail,
-    required String vetEmail,
-    String? vetName,
-    required String message,
-    required String notes,
+  Future<void> escalateCase(
+    String caseId, {
+    bool? allowAssignment,
+    int? requestedVetId,
+    String? vetEmail,
+    String? requestNote,
   }) async {
     await initialize();
-    final actor = await _loadActorIdentity();
-    await _backendClient.sendCaseToVet(
-      caseId: caseId,
-      senderRole: senderRole,
-      senderId: senderId,
-      senderName: senderName ?? actor['name'],
-      senderEmail: senderEmail ?? actor['email'],
+    await _backendClient.escalateCase(
+      caseId,
+      allowAssignment: allowAssignment,
+      requestedVetId: requestedVetId,
       vetEmail: vetEmail,
-      vetName: vetName,
-      message: message,
-      notes: notes,
+      requestNote: requestNote,
+    );
+  }
+
+  Future<void> claimCase({
+    required String caseId,
+    String? note,
+  }) async {
+    await initialize();
+    await _backendClient.claimCase(
+      caseId: caseId,
+      note: note,
     );
   }
 
@@ -299,28 +317,6 @@ class CaseRepository {
       prescription: prescription,
       followUpDate: followUpDate,
       message: message,
-    );
-  }
-
-  Future<void> acknowledgeCase({
-    required String caseId,
-    required String status,
-    required String senderRole,
-    String? senderId,
-    String? senderName,
-    String? senderEmail,
-    required String notes,
-  }) async {
-    await initialize();
-    final actor = await _loadActorIdentity();
-    await _backendClient.acknowledgeCase(
-      caseId: caseId,
-      status: status,
-      senderRole: senderRole,
-      senderId: senderId,
-      senderName: senderName ?? actor['name'],
-      senderEmail: senderEmail ?? actor['email'],
-      notes: notes,
     );
   }
 
@@ -393,9 +389,12 @@ class CaseRepository {
         }
         return _waitForJobs([jobId]);
       }
+      if (response.containsKey('id')) {
+        return const SyncResult(syncedCount: 1, failedCount: 0);
+      }
       return SyncResult(
-        syncedCount: _toInt(response['syncedCount']),
-        failedCount: _toInt(response['failedCount']),
+        syncedCount: _toInt(response['syncedCount'] ?? response['synced']),
+        failedCount: _toInt(response['failedCount'] ?? response['failed']),
         errorMessage: response['errorMessage']?.toString(),
       );
     } on ApiException catch (e) {
@@ -434,8 +433,8 @@ class CaseRepository {
         return _waitForJobs(jobIds);
       }
       return SyncResult(
-        syncedCount: _toInt(response['syncedCount']),
-        failedCount: _toInt(response['failedCount']),
+        syncedCount: _toInt(response['syncedCount'] ?? response['synced']),
+        failedCount: _toInt(response['failedCount'] ?? response['failed']),
         errorMessage: response['errorMessage']?.toString(),
       );
     } on ApiException catch (e) {

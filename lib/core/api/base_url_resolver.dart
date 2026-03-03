@@ -29,14 +29,16 @@ class BaseUrlResolver {
     bool? isWeb,
     TargetPlatform? platform,
   }) {
+    final configured = normalize(buildTimeDefault ?? _buildDefaultApiUrl);
+    // Explicit build-time override should win so developers can recover from stale saved URLs
+    // (common on Flutter web when a previous backend port is cached in shared_preferences).
+    if (configured.isNotEmpty) {
+      return configured;
+    }
+
     final saved = normalize(savedOverride);
     if (saved.isNotEmpty) {
       return saved;
-    }
-
-    final configured = normalize(buildTimeDefault ?? _buildDefaultApiUrl);
-    if (configured.isNotEmpty) {
-      return configured;
     }
 
     return _platformFallback(
@@ -62,17 +64,17 @@ class BaseUrlResolver {
     required TargetPlatform platform,
   }) {
     if (isWeb) {
-      return 'http://127.0.0.1:8000';
+      return 'http://127.0.0.1:8002';
     }
     switch (platform) {
       case TargetPlatform.android:
-        return 'http://10.0.2.2:8000';
+        return 'http://10.0.2.2:8002';
       case TargetPlatform.iOS:
       case TargetPlatform.macOS:
       case TargetPlatform.windows:
       case TargetPlatform.linux:
       case TargetPlatform.fuchsia:
-        return 'http://127.0.0.1:8000';
+        return 'http://127.0.0.1:8002';
     }
   }
 

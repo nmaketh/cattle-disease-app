@@ -72,8 +72,6 @@ class _VerifySignupPageState extends State<VerifySignupPage> {
       child: AuthScaffold(
         title: 'Verify Email',
         subtitle: 'Enter the OTP sent to ${widget.email}.',
-        illustrationIcon: Icons.verified_user_rounded,
-        illustrationLabel: 'OTP verification illustration',
         child: Form(
           key: _formKey,
           child: Column(

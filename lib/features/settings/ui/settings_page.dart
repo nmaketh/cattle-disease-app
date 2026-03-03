@@ -170,6 +170,20 @@ class _ProfileAndRoleCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final authState = context.watch<AuthBloc>().state;
+    final serverRole = authState is AuthAuthenticated ? authState.user.role : '';
+    final isCahw = serverRole.isEmpty || serverRole.toUpperCase() == 'CAHW';
+
+    String roleLabel;
+    switch (serverRole.toUpperCase()) {
+      case 'VET':
+        roleLabel = 'Veterinarian';
+      case 'ADMIN':
+        roleLabel = 'Administrator';
+      default:
+        roleLabel = 'Community Animal Health Worker (CAHW)';
+    }
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -184,37 +198,31 @@ class _ProfileAndRoleCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'Role and vet contact used for referrals, receipts, and case routing.',
+              'Settings used for case routing and notifications.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 10),
-            AppTextField(
-              controller: vetEmailController,
-              label: 'Vet email (for referrals/receipts)',
-              hint: 'vet@clinic.org',
-              prefixIcon: Icons.alternate_email_rounded,
-              keyboardType: TextInputType.emailAddress,
-              onChanged: (value) =>
-                  context.read<SettingsBloc>().add(SettingsVetEmailChanged(value)),
-            ),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              initialValue: settingsState.userRole,
+            // Read-only server role display
+            InputDecorator(
               decoration: const InputDecoration(
-                labelText: 'App role',
+                labelText: 'Your role',
                 prefixIcon: Icon(Icons.badge_outlined),
               ),
-              items: const [
-                DropdownMenuItem(value: 'chw', child: Text('CHW / Field User')),
-                DropdownMenuItem(value: 'vet', child: Text('Veterinarian')),
-              ],
-              onChanged: (value) {
-                if (value == null) {
-                  return;
-                }
-                context.read<SettingsBloc>().add(SettingsUserRoleChanged(value));
-              },
+              child: Text(roleLabel, style: Theme.of(context).textTheme.bodyMedium),
             ),
+            // Vet email field is only relevant for CAHW users placing referrals
+            if (isCahw) ...[
+              const SizedBox(height: 10),
+              AppTextField(
+                controller: vetEmailController,
+                label: 'Vet email (for referrals/receipts)',
+                hint: 'vet@clinic.org',
+                prefixIcon: Icons.alternate_email_rounded,
+                keyboardType: TextInputType.emailAddress,
+                onChanged: (value) =>
+                    context.read<SettingsBloc>().add(SettingsVetEmailChanged(value)),
+              ),
+            ],
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               initialValue: settingsState.themeMode,

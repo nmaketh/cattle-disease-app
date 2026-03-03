@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'base_url_resolver.dart';
+import 'session_events.dart' as session;
 import '../models/app_user.dart';
 import '../models/auth_response.dart';
 import '../models/reset_otp_challenge.dart';
@@ -203,7 +204,7 @@ class ApiClient {
     final response = await _postFirstSuccessful(
       baseUrl: baseUrl,
       paths: const ['/auth/refresh', '/refresh'],
-      body: {'refreshToken': refreshToken},
+      body: {'refreshToken': refreshToken, 'refresh_token': refreshToken},
     );
     return _authFromJson(response, fallbackEmail: 'user@cattle.ai');
   }
@@ -252,6 +253,10 @@ class ApiClient {
       final response = await http.Response.fromStream(streamed);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        if (response.statusCode == 401 || response.statusCode == 403) {
+          session.signalSessionExpired();
+          throw const ApiException('Session expired. Please log in again.');
+        }
         if (response.statusCode == 502 ||
             response.statusCode == 503 ||
             response.statusCode == 504) {
@@ -409,7 +414,7 @@ class ApiClient {
     final body = {'name': name, 'email': email, 'password': password};
     return _postFirstSuccessful(
       baseUrl: baseUrl,
-      paths: const ['/auth/register', '/auth/signup', '/register', '/signup'],
+      paths: const ['/auth/signup', '/auth/register', '/signup', '/register'],
       body: body,
     );
   }
@@ -526,6 +531,7 @@ class ApiClient {
     String? id;
     String? name;
     String? email;
+    String? role;
 
     if (userPayload is Map<String, dynamic>) {
       id = userPayload['id']?.toString().trim();
@@ -533,11 +539,13 @@ class ApiClient {
       email = (userPayload['email'] ?? userPayload['username'])
           ?.toString()
           .trim();
+      role = userPayload['role']?.toString().trim().toUpperCase();
     }
 
     id ??= (json['user_id'] ?? json['id'])?.toString().trim();
     name ??= (json['name'] ?? json['full_name'])?.toString().trim();
     email ??= (json['email'] ?? json['username'])?.toString().trim();
+    role ??= json['role']?.toString().trim().toUpperCase();
 
     return AuthResponse(
       token: token,
@@ -546,6 +554,7 @@ class ApiClient {
         id: (id == null || id.isEmpty) ? 'u-${DateTime.now().millisecondsSinceEpoch}' : id,
         name: (name == null || name.isEmpty) ? fallbackName : name,
         email: (email == null || email.isEmpty) ? fallbackEmail : email.toLowerCase(),
+        role: (role == null || role.isEmpty) ? '' : role,
       ),
     );
   }

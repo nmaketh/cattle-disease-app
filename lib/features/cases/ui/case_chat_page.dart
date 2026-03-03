@@ -1,10 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/api/api_client.dart';
-import '../../settings/data/settings_repository.dart';
 import '../data/case_repository.dart';
 
 class CaseChatPage extends StatefulWidget {
@@ -12,13 +12,11 @@ class CaseChatPage extends StatefulWidget {
     super.key,
     required this.caseId,
     required this.caseRepository,
-    required this.settingsRepository,
     required this.initialUserRole,
   });
 
   final String caseId;
   final CaseRepository caseRepository;
-  final SettingsRepository settingsRepository;
   final String initialUserRole;
 
   @override
@@ -27,10 +25,12 @@ class CaseChatPage extends StatefulWidget {
 
 class _CaseChatPageState extends State<CaseChatPage> {
   final _messageController = TextEditingController();
-  bool _loading = false;
+  final _scrollController = ScrollController();
+  bool _initialLoading = true;
   bool _sending = false;
   String _userRole = 'chw';
   String _workflowStatus = 'unknown';
+  int? _assignedVetId;
   String? _errorMessage;
   List<Map<String, dynamic>> _messages = const [];
   Timer? _pollTimer;
@@ -39,7 +39,7 @@ class _CaseChatPageState extends State<CaseChatPage> {
   void initState() {
     super.initState();
     _userRole = widget.initialUserRole;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load(initial: true));
     _pollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (mounted) _load();
     });
@@ -49,48 +49,66 @@ class _CaseChatPageState extends State<CaseChatPage> {
   void dispose() {
     _pollTimer?.cancel();
     _messageController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  String _fmtTs(Object? value) {
-    final s = value?.toString() ?? '';
-    final dt = s.isEmpty ? null : DateTime.tryParse(s)?.toLocal();
-    if (dt == null) return s;
-    return DateFormat('MMM d, h:mm a').format(dt);
+  void _scrollToBottom({bool animate = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      if (animate) {
+        _scrollController.animateTo(
+          max,
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scrollController.jumpTo(max);
+      }
+    });
   }
 
-  Future<void> _load() async {
-    if (_loading) return;
-    setState(() => _loading = true);
+  Future<void> _load({bool initial = false}) async {
     try {
-      final settings = await widget.settingsRepository.load();
-      if (!mounted) return;
       final timeline = await widget.caseRepository.getCaseTimeline(widget.caseId);
       if (!mounted) return;
       final raw = timeline['messages'];
       final parsed = raw is List
           ? raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(growable: false)
           : const <Map<String, dynamic>>[];
+      final prevCount = _messages.length;
+      final assignedVetIdRaw = timeline['assignedVetId'];
+      final assignedVetId = assignedVetIdRaw is int
+          ? assignedVetIdRaw
+          : int.tryParse(assignedVetIdRaw?.toString() ?? '');
       setState(() {
-        _userRole = settings.userRole;
         _workflowStatus = timeline['workflowStatus']?.toString() ?? 'unknown';
+        _assignedVetId = assignedVetId;
         _messages = parsed;
         _errorMessage = null;
+        if (initial) _initialLoading = false;
       });
+      if (initial || parsed.length > prevCount) {
+        _scrollToBottom(animate: !initial);
+      }
     } catch (e) {
       if (!mounted) return;
-      setState(() => _errorMessage = 'Failed to load chat timeline.');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load chat timeline: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      setState(() {
+        if (initial) _initialLoading = false;
+        _errorMessage = 'Failed to load messages.';
+      });
     }
   }
 
+  /// CAHW cannot chat until a vet is assigned/claimed on this case.
+  bool get _cahwChatLocked =>
+      _userRole.toLowerCase() == 'cahw' && _assignedVetId == null;
+
   Future<void> _send() async {
     final msg = _messageController.text.trim();
-    if (msg.isEmpty || _sending) return;
+    if (msg.isEmpty || _sending || _cahwChatLocked) return;
+    HapticFeedback.lightImpact();
     setState(() => _sending = true);
     try {
       await widget.caseRepository.addCaseMessage(
@@ -100,203 +118,458 @@ class _CaseChatPageState extends State<CaseChatPage> {
       );
       _messageController.clear();
       await _load();
+      _scrollToBottom(animate: true);
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to send message.')),
+      );
     } finally {
       if (mounted) setState(() => _sending = false);
     }
   }
 
-  Widget _bubble(Map<String, dynamic> item) {
-    final role = (item['senderRole'] ?? 'unknown').toString();
-    final msg = (item['message'] ?? '').toString();
-    final mine = role.toLowerCase() == _userRole.toLowerCase();
-    final ts = _fmtTs(item['createdAt']);
-    final bg = mine ? const Color(0xFFDCF8E7) : Colors.white;
-    final border = mine ? const Color(0xFFB7E4C7) : const Color(0xFFE5E7EB);
-    final radius = BorderRadius.only(
-      topLeft: const Radius.circular(16),
-      topRight: const Radius.circular(16),
-      bottomLeft: Radius.circular(mine ? 16 : 4),
-      bottomRight: Radius.circular(mine ? 4 : 16),
-    );
+  // ── Formatting helpers ────────────────────────────────────────────────────
 
-    return Row(
-      mainAxisAlignment: mine ? MainAxisAlignment.end : MainAxisAlignment.start,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        if (!mine)
-          CircleAvatar(
-            radius: 14,
-            backgroundColor: const Color(0xFFE5E7EB),
+  String _formatTime(Object? value) {
+    final s = value?.toString() ?? '';
+    final dt = s.isEmpty ? null : DateTime.tryParse(s)?.toLocal();
+    if (dt == null) return '';
+    final now = DateTime.now();
+    if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+      return DateFormat('h:mm a').format(dt);
+    }
+    return DateFormat('MMM d, h:mm a').format(dt);
+  }
+
+  String _formatDateLabel(Object? value) {
+    final s = value?.toString() ?? '';
+    final dt = s.isEmpty ? null : DateTime.tryParse(s)?.toLocal();
+    if (dt == null) return '';
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDay = DateTime(dt.year, dt.month, dt.day);
+    final diff = today.difference(msgDay).inDays;
+    if (diff == 0) return 'Today';
+    if (diff == 1) return 'Yesterday';
+    return DateFormat('MMMM d, y').format(dt);
+  }
+
+  bool _isSameDay(Object? a, Object? b) {
+    final da = _parseLocalDate(a);
+    final db = _parseLocalDate(b);
+    if (da == null || db == null) return false;
+    return da.year == db.year && da.month == db.month && da.day == db.day;
+  }
+
+  DateTime? _parseLocalDate(Object? value) {
+    final s = value?.toString() ?? '';
+    return s.isEmpty ? null : DateTime.tryParse(s)?.toLocal();
+  }
+
+  String _roleLabel(String role) {
+    switch (role.toLowerCase()) {
+      case 'vet':
+        return 'Vet';
+      case 'chw':
+      case 'cahw':
+        return 'CAHW';
+      case 'admin':
+        return 'Admin';
+      default:
+        if (role.isEmpty) return '?';
+        return role[0].toUpperCase() + role.substring(1);
+    }
+  }
+
+  String _statusLabel(String status) {
+    switch (status.toLowerCase()) {
+      case 'open':
+        return 'Open';
+      case 'in_treatment':
+      case 'in-treatment':
+        return 'In Treatment';
+      case 'resolved':
+        return 'Resolved';
+      case 'closed':
+        return 'Closed';
+      case 'unknown':
+        return 'Unknown';
+      default:
+        if (status.isEmpty) return 'Unknown';
+        return status[0].toUpperCase() + status.substring(1);
+    }
+  }
+
+  Color _statusColor(String status, ColorScheme cs) {
+    switch (status.toLowerCase()) {
+      case 'open':
+        return cs.primary;
+      case 'in_treatment':
+      case 'in-treatment':
+        return Colors.orange.shade600;
+      case 'resolved':
+        return Colors.teal;
+      case 'closed':
+        return cs.outline;
+      default:
+        return cs.outline;
+    }
+  }
+
+  // ── Widgets ───────────────────────────────────────────────────────────────
+
+  Widget _dateSeparator(String label) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Row(
+        children: [
+          Expanded(child: Divider(color: cs.outlineVariant, height: 1)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Text(
-              role.isEmpty ? '?' : role[0].toUpperCase(),
-              style: const TextStyle(fontSize: 11, color: Colors.black87),
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: cs.outline,
+                letterSpacing: 0.2,
+              ),
             ),
           ),
-        if (!mine) const SizedBox(width: 8),
-        Flexible(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: bg,
-              borderRadius: radius,
-              border: Border.all(color: border),
-              boxShadow: const [
-                BoxShadow(color: Color(0x0D000000), blurRadius: 6, offset: Offset(0, 2)),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  role.toUpperCase(),
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF4B5563)),
-                ),
-                const SizedBox(height: 4),
-                Text(msg, style: const TextStyle(height: 1.25)),
-                const SizedBox(height: 6),
-                Text(ts, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280))),
-              ],
-            ),
-          ),
-        ),
-        if (mine) const SizedBox(width: 8),
-        if (mine)
-          const CircleAvatar(
-            radius: 14,
-            backgroundColor: Color(0xFF0F766E),
-            child: Icon(Icons.person, size: 14, color: Colors.white),
-          ),
-      ],
+          Expanded(child: Divider(color: cs.outlineVariant, height: 1)),
+        ],
+      ),
     );
   }
 
-  Widget _messagesPanel() {
-    if (_loading && _messages.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_errorMessage != null && _messages.isEmpty) {
+  Widget _bubble(Map<String, dynamic> item) {
+    final cs = Theme.of(context).colorScheme;
+    final role = (item['senderRole'] ?? '').toString();
+    final msg = (item['message'] ?? '').toString();
+    final mine = role.toLowerCase() == _userRole.toLowerCase();
+    final ts = _formatTime(item['createdAt']);
+    final label = _roleLabel(role);
+
+    final bgColor = mine ? cs.primaryContainer : cs.surfaceContainerHighest;
+    final textColor = mine ? cs.onPrimaryContainer : cs.onSurface;
+    final labelColor = mine ? cs.primary : cs.outline;
+    final avatarBg = mine ? cs.primary : cs.secondaryContainer;
+    final avatarFg = mine ? cs.onPrimary : cs.onSecondaryContainer;
+
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(mine ? 18 : 4),
+      bottomRight: Radius.circular(mine ? 4 : 18),
+    );
+
+    final avatar = CircleAvatar(
+      radius: 15,
+      backgroundColor: avatarBg,
+      child: Text(
+        label.isEmpty ? '?' : label[0].toUpperCase(),
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: avatarFg),
+      ),
+    );
+
+    // Use Align + ConstrainedBox so the bubble stays on its side and doesn't
+    // expand to fill the full row width.
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (!mine) ...[avatar, const SizedBox(width: 8)],
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width * 0.72,
+            ),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(color: bgColor, borderRadius: radius),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: labelColor,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(msg, style: TextStyle(fontSize: 14, height: 1.4, color: textColor)),
+                  const SizedBox(height: 5),
+                  Text(
+                    ts,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: textColor.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (mine) ...[const SizedBox(width: 8), avatar],
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyState(ColorScheme cs) {
+    if (_errorMessage != null) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(32),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(_errorMessage!, textAlign: TextAlign.center),
-              const SizedBox(height: 8),
-              FilledButton.tonal(onPressed: _load, child: const Text('Retry')),
+              Icon(Icons.wifi_off_rounded, size: 48, color: cs.outline),
+              const SizedBox(height: 14),
+              Text(
+                _errorMessage!,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: cs.outline, fontSize: 14),
+              ),
+              const SizedBox(height: 18),
+              FilledButton.tonal(
+                onPressed: () => _load(initial: true),
+                child: const Text('Retry'),
+              ),
             ],
           ),
         ),
       );
     }
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.chat_bubble_outline_rounded,
+              size: 56,
+              color: cs.primary.withValues(alpha: 0.22),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'No messages yet',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: cs.onSurface.withValues(alpha: 0.5),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Start a conversation with your vet\nto discuss this case.',
+              style: TextStyle(fontSize: 13, color: cs.outline, height: 1.5),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _messagesPanel(ColorScheme cs) {
+    if (_initialLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
     if (_messages.isEmpty) {
-      return const Center(child: Text('No messages yet.'));
+      return _emptyState(cs);
     }
 
-    return ListView.separated(
-      key: ValueKey('chat-${_messages.length}'),
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-      itemCount: _messages.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 10),
-      itemBuilder: (context, index) => _bubble(_messages[index]),
+    final items = <Widget>[];
+    for (var i = 0; i < _messages.length; i++) {
+      final msg = _messages[i];
+      final prevTs = i > 0 ? _messages[i - 1]['createdAt'] : null;
+      if (!_isSameDay(prevTs, msg['createdAt'])) {
+        items.add(_dateSeparator(_formatDateLabel(msg['createdAt'])));
+      }
+      items.add(_bubble(msg));
+    }
+
+    return ListView(
+      controller: _scrollController,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 16),
+      children: [
+        for (var i = 0; i < items.length; i++) ...[
+          items[i],
+          if (i < items.length - 1) const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  Widget _inputBar(ColorScheme cs) {
+    // CAHW cannot send messages until a vet is assigned to this case.
+    if (_cahwChatLocked) {
+      return Container(
+        padding: EdgeInsets.fromLTRB(
+            16, 12, 16, MediaQuery.of(context).viewInsets.bottom > 0 ? 12 : 16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).scaffoldBackgroundColor,
+          border: Border(top: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.6))),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.lock_outline_rounded, size: 18, color: cs.outline),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Chat is available once a vet has been assigned to this case.',
+                style: TextStyle(fontSize: 13, color: cs.outline, height: 1.4),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: EdgeInsets.fromLTRB(12, 8, 12, MediaQuery.of(context).viewInsets.bottom > 0 ? 8 : 12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        border: Border(top: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.6))),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _messageController,
+              minLines: 1,
+              maxLines: 5,
+              textInputAction: TextInputAction.newline,
+              style: const TextStyle(fontSize: 15),
+              decoration: InputDecoration(
+                hintText: 'Type a message…',
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  borderSide: BorderSide(color: cs.outlineVariant),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  borderSide: BorderSide(color: cs.outlineVariant),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  borderSide: BorderSide(color: cs.primary, width: 1.5),
+                ),
+                filled: true,
+                fillColor: cs.surfaceContainerLowest,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 180),
+            child: _sending
+                ? SizedBox(
+                    key: const ValueKey('loading'),
+                    width: 46,
+                    height: 46,
+                    child: Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2.5, color: cs.primary),
+                      ),
+                    ),
+                  )
+                : Material(
+                    key: const ValueKey('send'),
+                    color: cs.primary,
+                    borderRadius: BorderRadius.circular(23),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(23),
+                      onTap: _send,
+                      child: SizedBox(
+                        width: 46,
+                        height: 46,
+                        child: Icon(Icons.send_rounded, color: cs.onPrimary, size: 20),
+                      ),
+                    ),
+                  ),
+          ),
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final shortId = widget.caseId.length > 8 ? widget.caseId.substring(0, 8) : widget.caseId;
+    final cs = Theme.of(context).colorScheme;
+    final statusLabel = _statusLabel(_workflowStatus);
+    final statusColor = _statusColor(_workflowStatus, cs);
+    final shortId = widget.caseId.length > 8
+        ? '…${widget.caseId.substring(widget.caseId.length - 8)}'
+        : widget.caseId;
+
     return Scaffold(
-      backgroundColor: const Color(0xFFF3F4F6),
       appBar: AppBar(
-        title: const Text('Case Chat'),
-        actions: [IconButton(onPressed: _load, icon: const Icon(Icons.refresh_rounded))],
+        titleSpacing: 0,
+        title: Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Case Chat', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17)),
+              const SizedBox(height: 1),
+              Row(
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    '$statusLabel · $shortId',
+                    style: TextStyle(fontSize: 12, color: cs.outline, fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          IconButton(
+            onPressed: () => _load(initial: true),
+            icon: const Icon(Icons.refresh_rounded),
+            tooltip: 'Refresh',
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
           children: [
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Color(0xFFF0FDF4), Color(0xFFEFF6FF)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
-              ),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  const Text('Secure case conversation', style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF111827))),
-                  const SizedBox(width: 8),
-                  Chip(label: Text('Role: ${_userRole.toUpperCase()}')),
-                  Chip(label: Text('Status: $_workflowStatus')),
-                  Chip(label: Text('Case: $shortId')),
-                  if (_loading) const Chip(label: Text('Refreshing...')),
-                ],
-              ),
-            ),
-            Expanded(child: _messagesPanel()),
-            if (_errorMessage != null)
+            Expanded(child: _messagesPanel(cs)),
+            if (_errorMessage != null && _messages.isNotEmpty)
               Container(
                 width: double.infinity,
-                color: Colors.red.shade50,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text(_errorMessage!, style: TextStyle(color: Colors.red.shade700)),
+                color: cs.errorContainer,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                child: Text(
+                  _errorMessage!,
+                  style: TextStyle(color: cs.onErrorContainer, fontSize: 13),
+                ),
               ),
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _messageController,
-                      minLines: 1,
-                      maxLines: 4,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        filled: true,
-                        fillColor: const Color(0xFFF9FAFB),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFF0F766E), width: 1.5),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    height: 48,
-                    child: FilledButton.icon(
-                      onPressed: _sending ? null : _send,
-                      icon: const Icon(Icons.send_rounded),
-                      label: Text(_sending ? 'Sending' : 'Send'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            _inputBar(cs),
           ],
         ),
       ),

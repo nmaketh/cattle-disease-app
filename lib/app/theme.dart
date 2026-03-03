@@ -1,6 +1,134 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+// ── Disease colour palette (shared across light & dark themes) ───────────────
+
+class DiseaseColors extends ThemeExtension<DiseaseColors> {
+  const DiseaseColors({
+    required this.lsd,
+    required this.lsdOnSurface,
+    required this.fmd,
+    required this.fmdOnSurface,
+    required this.ecf,
+    required this.ecfOnSurface,
+    required this.cbpp,
+    required this.cbppOnSurface,
+    required this.normal,
+    required this.normalOnSurface,
+    required this.unknown,
+    required this.unknownOnSurface,
+  });
+
+  final Color lsd;
+  final Color lsdOnSurface;
+  final Color fmd;
+  final Color fmdOnSurface;
+  final Color ecf;
+  final Color ecfOnSurface;
+  final Color cbpp;
+  final Color cbppOnSurface;
+  final Color normal;
+  final Color normalOnSurface;
+  final Color unknown;
+  final Color unknownOnSurface;
+
+  /// Returns the disease accent colour for a given disease key.
+  Color colorFor(String diseaseKey) {
+    switch (diseaseKey.toLowerCase()) {
+      case 'lsd':    return lsd;
+      case 'fmd':    return fmd;
+      case 'ecf':    return ecf;
+      case 'cbpp':   return cbpp;
+      case 'normal': return normal;
+      default:       return unknown;
+    }
+  }
+
+  /// Returns the on-surface (text/icon) colour for a disease.
+  Color onSurfaceFor(String diseaseKey) {
+    switch (diseaseKey.toLowerCase()) {
+      case 'lsd':    return lsdOnSurface;
+      case 'fmd':    return fmdOnSurface;
+      case 'ecf':    return ecfOnSurface;
+      case 'cbpp':   return cbppOnSurface;
+      case 'normal': return normalOnSurface;
+      default:       return unknownOnSurface;
+    }
+  }
+
+  static const light = DiseaseColors(
+    lsd:             Color(0xFFFFF3CD),
+    lsdOnSurface:    Color(0xFF7A5A00),
+    fmd:             Color(0xFFFFE0DB),
+    fmdOnSurface:    Color(0xFF8B2615),
+    ecf:             Color(0xFFEDE2F8),
+    ecfOnSurface:    Color(0xFF4A2878),
+    cbpp:            Color(0xFFD6EAF8),
+    cbppOnSurface:   Color(0xFF1A4E6E),
+    normal:          Color(0xFFDFF2E5),
+    normalOnSurface: Color(0xFF1B5E38),
+    unknown:         Color(0xFFECECEC),
+    unknownOnSurface:Color(0xFF444444),
+  );
+
+  static const dark = DiseaseColors(
+    lsd:             Color(0xFF3D2E00),
+    lsdOnSurface:    Color(0xFFFFD97D),
+    fmd:             Color(0xFF3D1510),
+    fmdOnSurface:    Color(0xFFFFB4AB),
+    ecf:             Color(0xFF2A1840),
+    ecfOnSurface:    Color(0xFFCDB4FF),
+    cbpp:            Color(0xFF0D2A3D),
+    cbppOnSurface:   Color(0xFF90CAF9),
+    normal:          Color(0xFF0D2E1A),
+    normalOnSurface: Color(0xFF81C784),
+    unknown:         Color(0xFF2A2A2A),
+    unknownOnSurface:Color(0xFFBBBBBB),
+  );
+
+  @override
+  DiseaseColors copyWith({
+    Color? lsd, Color? lsdOnSurface,
+    Color? fmd, Color? fmdOnSurface,
+    Color? ecf, Color? ecfOnSurface,
+    Color? cbpp, Color? cbppOnSurface,
+    Color? normal, Color? normalOnSurface,
+    Color? unknown, Color? unknownOnSurface,
+  }) => DiseaseColors(
+    lsd:             lsd             ?? this.lsd,
+    lsdOnSurface:    lsdOnSurface    ?? this.lsdOnSurface,
+    fmd:             fmd             ?? this.fmd,
+    fmdOnSurface:    fmdOnSurface    ?? this.fmdOnSurface,
+    ecf:             ecf             ?? this.ecf,
+    ecfOnSurface:    ecfOnSurface    ?? this.ecfOnSurface,
+    cbpp:            cbpp            ?? this.cbpp,
+    cbppOnSurface:   cbppOnSurface   ?? this.cbppOnSurface,
+    normal:          normal          ?? this.normal,
+    normalOnSurface: normalOnSurface ?? this.normalOnSurface,
+    unknown:         unknown         ?? this.unknown,
+    unknownOnSurface:unknownOnSurface?? this.unknownOnSurface,
+  );
+
+  @override
+  DiseaseColors lerp(DiseaseColors? other, double t) {
+    if (other == null) return this;
+    return DiseaseColors(
+      lsd:             Color.lerp(lsd,             other.lsd,             t)!,
+      lsdOnSurface:    Color.lerp(lsdOnSurface,    other.lsdOnSurface,    t)!,
+      fmd:             Color.lerp(fmd,             other.fmd,             t)!,
+      fmdOnSurface:    Color.lerp(fmdOnSurface,    other.fmdOnSurface,    t)!,
+      ecf:             Color.lerp(ecf,             other.ecf,             t)!,
+      ecfOnSurface:    Color.lerp(ecfOnSurface,    other.ecfOnSurface,    t)!,
+      cbpp:            Color.lerp(cbpp,            other.cbpp,            t)!,
+      cbppOnSurface:   Color.lerp(cbppOnSurface,   other.cbppOnSurface,   t)!,
+      normal:          Color.lerp(normal,          other.normal,          t)!,
+      normalOnSurface: Color.lerp(normalOnSurface, other.normalOnSurface, t)!,
+      unknown:         Color.lerp(unknown,         other.unknown,         t)!,
+      unknownOnSurface:Color.lerp(unknownOnSurface,other.unknownOnSurface,t)!,
+    );
+  }
+}
+
 ThemeData buildAppTheme() {
   const primary = Color(0xFF2E7D4F);
   const secondary = Color(0xFF6A8B78);
@@ -14,6 +142,7 @@ ThemeData buildAppTheme() {
     primary: primary,
     secondary: secondary,
     tertiary: tertiary,
+    surface: const Color(0xFFFFFEFB),
     brightness: Brightness.light,
   );
 
@@ -68,7 +197,7 @@ ThemeData buildAppTheme() {
     textTheme: textTheme,
     appBarTheme: const AppBarTheme(
       centerTitle: false,
-      backgroundColor: surfaceWarm,
+      backgroundColor: Colors.transparent,
       foregroundColor: textDark,
       elevation: 0,
       scrolledUnderElevation: 0,
@@ -76,10 +205,11 @@ ThemeData buildAppTheme() {
     ),
     cardTheme: CardThemeData(
       color: Colors.white,
-      elevation: 0,
+      elevation: 1,
+      shadowColor: const Color(0x221D3A28),
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(20),
         side: const BorderSide(color: borderSoft),
       ),
     ),
@@ -136,9 +266,9 @@ ThemeData buildAppTheme() {
       labelTextStyle: WidgetStateProperty.all(
         const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
       ),
-      height: 72,
-      indicatorColor: const Color(0xFFE5F0E7),
-      backgroundColor: const Color(0xFFFFFEFB),
+      height: 76,
+      indicatorColor: const Color(0xFFDDEDE2),
+      backgroundColor: const Color(0xFFFDFCF8),
       surfaceTintColor: Colors.transparent,
     ),
     snackBarTheme: SnackBarThemeData(
@@ -164,7 +294,9 @@ ThemeData buildAppTheme() {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
     ),
     listTileTheme: const ListTileThemeData(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(12)),
+      ),
       iconColor: primary,
       textColor: textDark,
     ),
@@ -174,7 +306,7 @@ ThemeData buildAppTheme() {
       selectionHandleColor: primary,
     ),
     iconTheme: const IconThemeData(color: primary),
-    extensions: const <ThemeExtension<dynamic>>[],
+    extensions: const <ThemeExtension<dynamic>>[DiseaseColors.light],
   );
 }
 
@@ -194,6 +326,7 @@ ThemeData buildAppDarkTheme() {
     primary: primary,
     secondary: secondary,
     tertiary: tertiary,
+    surface: const Color(0xFF171D17),
     brightness: Brightness.dark,
   );
 
@@ -240,10 +373,26 @@ ThemeData buildAppDarkTheme() {
       height: 1.15,
       color: textLight,
     ),
-    bodyLarge: GoogleFonts.manrope(fontSize: 16, height: 1.42, color: textLight),
-    bodyMedium: GoogleFonts.manrope(fontSize: 14, height: 1.42, color: textLight),
-    bodySmall: GoogleFonts.manrope(fontSize: 12, height: 1.35, color: textMuted),
-    labelLarge: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w700, color: textLight),
+    bodyLarge: GoogleFonts.manrope(
+      fontSize: 16,
+      height: 1.42,
+      color: textLight,
+    ),
+    bodyMedium: GoogleFonts.manrope(
+      fontSize: 14,
+      height: 1.42,
+      color: textLight,
+    ),
+    bodySmall: GoogleFonts.manrope(
+      fontSize: 12,
+      height: 1.35,
+      color: textMuted,
+    ),
+    labelLarge: GoogleFonts.manrope(
+      fontSize: 16,
+      fontWeight: FontWeight.w700,
+      color: textLight,
+    ),
   );
 
   return ThemeData(
@@ -253,7 +402,7 @@ ThemeData buildAppDarkTheme() {
     textTheme: textTheme,
     appBarTheme: const AppBarTheme(
       centerTitle: false,
-      backgroundColor: surface,
+      backgroundColor: Colors.transparent,
       foregroundColor: textLight,
       elevation: 0,
       scrolledUnderElevation: 0,
@@ -261,10 +410,11 @@ ThemeData buildAppDarkTheme() {
     ),
     cardTheme: CardThemeData(
       color: surfacePanel,
-      elevation: 0,
+      elevation: 1,
+      shadowColor: const Color(0x33000000),
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(20),
         side: const BorderSide(color: borderSoft),
       ),
     ),
@@ -321,9 +471,9 @@ ThemeData buildAppDarkTheme() {
       labelTextStyle: WidgetStateProperty.all(
         const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
       ),
-      height: 72,
-      indicatorColor: const Color(0xFF233528),
-      backgroundColor: const Color(0xFF141914),
+      height: 76,
+      indicatorColor: const Color(0xFF274030),
+      backgroundColor: const Color(0xFF131914),
       surfaceTintColor: Colors.transparent,
     ),
     snackBarTheme: SnackBarThemeData(
@@ -339,7 +489,10 @@ ThemeData buildAppDarkTheme() {
     chipTheme: ChipThemeData(
       backgroundColor: surfaceSoft,
       selectedColor: const Color(0xFF24362A),
-      labelStyle: const TextStyle(color: textLight, fontWeight: FontWeight.w600),
+      labelStyle: const TextStyle(
+        color: textLight,
+        fontWeight: FontWeight.w600,
+      ),
       secondaryLabelStyle: const TextStyle(color: textLight),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(999),
@@ -349,7 +502,9 @@ ThemeData buildAppDarkTheme() {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
     ),
     listTileTheme: const ListTileThemeData(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(12)),
+      ),
       iconColor: primary,
       textColor: textLight,
     ),
@@ -370,6 +525,6 @@ ThemeData buildAppDarkTheme() {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
     ),
-    extensions: const <ThemeExtension<dynamic>>[],
+    extensions: const <ThemeExtension<dynamic>>[DiseaseColors.dark],
   );
 }

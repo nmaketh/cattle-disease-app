@@ -139,7 +139,7 @@ class AnimalProfile extends Equatable {
       dob: map['dob'] == null ? null : DateTime.tryParse(map['dob'].toString()),
       location: _normalize(map['location']?.toString()),
       notes: _normalize(map['notes']?.toString()),
-      createdAt: DateTime.tryParse(map['createdAt']?.toString() ?? '') ?? DateTime.now(),
+      createdAt: DateTime.tryParse((map['createdAt'] ?? map['created_at'])?.toString() ?? '') ?? DateTime.now(),
     );
   }
 

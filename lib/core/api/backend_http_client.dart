@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
 import 'base_url_resolver.dart';
+import 'session_events.dart' as session;
 
 class BackendHttpClient {
   BackendHttpClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
@@ -21,6 +23,7 @@ class BackendHttpClient {
     final params = <String, String>{};
     if (query.trim().isNotEmpty) {
       params['query'] = query.trim();
+      params['q'] = query.trim();
     }
     final decoded = await _request(
       method: 'GET',
@@ -73,9 +76,11 @@ class BackendHttpClient {
     final params = <String, String>{};
     if (query.trim().isNotEmpty) {
       params['query'] = query.trim();
+      params['q'] = query.trim();
     }
     if (animalId != null && animalId.trim().isNotEmpty) {
       params['animalId'] = animalId.trim();
+      params['animal_id'] = animalId.trim();
     }
     if (status != null && status.trim().isNotEmpty) {
       params['status'] = status.trim();
@@ -104,6 +109,18 @@ class BackendHttpClient {
       method: 'GET',
       path: '/vet/inbox',
       queryParameters: params,
+    );
+    if (decoded is! List) {
+      return const [];
+    }
+    return decoded.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> getAssignableVets() async {
+    final decoded = await _request(
+      method: 'GET',
+      path: '/users/assignable',
+      queryParameters: const {'role': 'VET'},
     );
     if (decoded is! List) {
       return const [];
@@ -160,37 +177,46 @@ class BackendHttpClient {
     );
   }
 
-  Future<Map<String, dynamic>> sendCaseToVet({
-    required String caseId,
-    required String senderRole,
-    String? senderId,
-    String? senderName,
-    String? senderEmail,
-    required String vetEmail,
-    String? vetId,
-    String? vetName,
-    required String message,
-    required String notes,
+  Future<void> escalateCase(
+    String caseId, {
+    bool? allowAssignment,
+    int? requestedVetId,
+    String? vetEmail,
+    String? requestNote,
   }) async {
-    final decoded = await _request(
-      method: 'POST',
-      path: '/cases/$caseId/send-to-vet',
-      body: {
-        'senderRole': senderRole,
-        'senderId': _normalize(senderId),
-        'senderName': _normalize(senderName),
-        'senderEmail': _normalize(senderEmail),
-        'vetEmail': vetEmail.trim(),
-        'vetId': _normalize(vetId),
-        'vetName': _normalize(vetName),
-        'message': message.trim(),
-        'notes': notes.trim(),
-      },
-    );
-    if (decoded is! Map<String, dynamic>) {
-      throw const ApiException('Invalid send-to-vet response from backend.');
+    final body = <String, dynamic>{};
+    if (allowAssignment != null) {
+      body['allowAssignment'] = allowAssignment;
     }
-    return decoded;
+    if (requestedVetId != null) {
+      body['requestedVetId'] = requestedVetId;
+    }
+    if (vetEmail != null && vetEmail.trim().isNotEmpty) {
+      body['vetEmail'] = vetEmail.trim();
+    }
+    if (requestNote != null && requestNote.trim().isNotEmpty) {
+      body['requestNote'] = requestNote.trim();
+    }
+    await _request(
+      method: 'POST',
+      path: '/cases/$caseId/escalate',
+      body: body.isEmpty ? null : body,
+    );
+  }
+
+  Future<void> claimCase({
+    required String caseId,
+    String? note,
+  }) async {
+    final body = <String, dynamic>{};
+    if (note != null && note.trim().isNotEmpty) {
+      body['note'] = note.trim();
+    }
+    await _request(
+      method: 'POST',
+      path: '/cases/$caseId/claim',
+      body: body.isEmpty ? null : body,
+    );
   }
 
   Future<Map<String, dynamic>> transferCaseToVet({
@@ -240,38 +266,11 @@ class BackendHttpClient {
       method: 'POST',
       path: '/cases/$caseId/vet/review',
       body: {
-        'senderRole': 'vet',
-        'senderId': _normalize(senderId),
-        'senderName': _normalize(senderName),
-        'senderEmail': _normalize(senderEmail),
         'assessment': assessment,
         'plan': plan,
         'prescription': prescription,
-        'followUpDate': followUpDate,
+        'follow_up_date': followUpDate,
         'message': message,
-      },
-    );
-  }
-
-  Future<void> acknowledgeCase({
-    required String caseId,
-    required String status,
-    required String senderRole,
-    String? senderId,
-    String? senderName,
-    String? senderEmail,
-    required String notes,
-  }) async {
-    await _request(
-      method: 'POST',
-      path: '/cases/$caseId/ack',
-      body: {
-        'status': status,
-        'senderRole': senderRole,
-        'senderId': _normalize(senderId),
-        'senderName': _normalize(senderName),
-        'senderEmail': _normalize(senderEmail),
-        'notes': notes.trim(),
       },
     );
   }
@@ -314,6 +313,7 @@ class BackendHttpClient {
     required List<String> attachments,
     required String? notes,
     required bool shouldAttemptSync,
+    bool allowAssignment = false,
   }) async {
     final baseUrl = await _baseUrl();
     if (baseUrl.isEmpty) {
@@ -349,12 +349,20 @@ class BackendHttpClient {
       'chwOwnerName': _normalize(chwOwnerName),
       'chwOwnerEmail': _normalize(chwOwnerEmail),
       'shouldAttemptSync': shouldAttemptSync,
+      'allowAssignment': allowAssignment,
     };
     request.fields['payload'] = jsonEncode(payload);
 
     for (var i = 0; i < bytesList.length && i < 3; i++) {
       final name = (i < trimmedNames.length) ? trimmedNames[i] : 'case_image_${i + 1}.jpg';
-      request.files.add(http.MultipartFile.fromBytes('files', bytesList[i], filename: name));
+      final ext = name.split('.').last.toLowerCase();
+      const subtypeMap = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'webp': 'webp', 'gif': 'gif'};
+      final subtype = subtypeMap[ext] ?? 'jpeg';
+      request.files.add(http.MultipartFile.fromBytes(
+        'files', bytesList[i],
+        filename: name,
+        contentType: MediaType('image', subtype),
+      ));
     }
 
     http.Response response;
@@ -446,6 +454,18 @@ class BackendHttpClient {
     );
   }
 
+  Future<Map<String, dynamic>> rejectCase(String caseId, String reason) async {
+    final decoded = await _request(
+      method: 'POST',
+      path: '/cases/$caseId/reject',
+      body: {'reason': reason.trim()},
+    );
+    if (decoded is! Map<String, dynamic>) {
+      throw const ApiException('Invalid reject response from backend.');
+    }
+    return decoded;
+  }
+
   Future<void> deleteCase(String caseId) async {
     await _request(method: 'DELETE', path: '/cases/$caseId');
   }
@@ -517,6 +537,11 @@ class BackendHttpClient {
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (response.statusCode == 401) {
+        // Token is invalid/expired and refresh also failed — force re-login.
+        session.signalSessionExpired();
+        throw const ApiException('Session expired. Please log in again.');
+      }
       if (response.statusCode == 404 &&
           (path.startsWith('/auth') ||
               path.startsWith('/animals') ||
@@ -605,7 +630,7 @@ class BackendHttpClient {
           .post(
             refreshUri,
             headers: const {'Content-Type': 'application/json'},
-            body: jsonEncode({'refreshToken': refreshToken}),
+            body: jsonEncode({'refreshToken': refreshToken, 'refresh_token': refreshToken}),
           )
           .timeout(_requestTimeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {

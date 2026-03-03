@@ -1,5 +1,5 @@
 name: cattle_disease_app
-description: "A new Flutter project."
+description: "SudVet — Field veterinary AI for cattle disease screening and referral."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -44,6 +44,7 @@ dependencies:
   image_picker: ^1.1.2
   intl: ^0.19.0
   http: ^1.2.2
+  http_parser: ^4.0.2
   connectivity_plus: ^6.1.4
   uuid: ^4.5.1
   url_launcher: ^6.3.1

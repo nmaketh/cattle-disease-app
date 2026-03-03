@@ -142,7 +142,10 @@ class _NewCasePageState extends State<NewCasePage> {
     context.read<CaseBloc>().add(
       CasePredictionSubmitted(
         animalId: _quickCase ? null : animal?.id,
-        symptoms: Map<String, bool>.from(_symptoms),
+        // Only send symptoms the user explicitly toggled ON.
+        // Sending absent (false) symptoms as negative evidence skews the
+        // Bayesian classifier toward "Normal" when no symptoms are selected.
+        symptoms: Map.fromEntries(_symptoms.entries.where((e) => e.value)),
         temperature: temperature,
         severity: _severity,
         imageFiles: List<XFile>.from(_selectedImages),

@@ -118,8 +118,6 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     return AuthScaffold(
       title: 'Reset Password',
       subtitle: 'Request an OTP code and set a new password securely.',
-      illustrationIcon: Icons.lock_reset_rounded,
-      illustrationLabel: 'Forgot password illustration',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

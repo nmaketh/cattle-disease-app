@@ -1,164 +1,193 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
-const _authLogoAsset = 'assets/branding/sudvet_logo.png';
-const _authBorder = Color(0xFFD8DCCF);
-const _authPanel = Color(0xFFFFFEFB);
-const _authLogoBg = Color(0xFFF3F6EC);
-const _authPrimary = Color(0xFF2E7D4F);
-const _authDeep = Color(0xFF1F5C3A);
+import '../../../widgets/sudvet_circle_logo.dart';
 
+const _bg1   = Color(0xFF0C2318);
+const _bg2   = Color(0xFF0F2B1E);
+const _glowG = Color(0xFF1F8A66);
+const _brightG = Color(0xFF4BC997);
+
+/// Shared scaffold for auth flows (signup, verify, forgot-password).
+/// Mirrors the login page's split-screen design: dark brand top + white form card.
 class AuthScaffold extends StatelessWidget {
   const AuthScaffold({
     super.key,
     required this.title,
     required this.subtitle,
     required this.child,
-    this.illustrationIcon = Icons.health_and_safety_rounded,
-    this.illustrationLabel = 'Cattle health app illustration',
+    this.logoSize = 72.0,
   });
 
   final String title;
   final String subtitle;
   final Widget child;
-  final IconData illustrationIcon;
-  final String illustrationLabel;
+  final double logoSize;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    final topBg = isDark ? const Color(0xFF152019) : const Color(0xFFE5F4EA);
-    final bottomBg = isDark ? const Color(0xFF0F1411) : const Color(0xFFF3F7F3);
+    final formBg = isDark ? const Color(0xFF0F1B14) : Colors.white;
+    final labelC = isDark ? const Color(0xFFDFECE2) : const Color(0xFF1D2A25);
+    final mutedC = isDark ? const Color(0xFF7A9C85) : const Color(0xFF65756F);
 
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [topBg, bottomBg],
+      backgroundColor: _bg1,
+      body: Stack(
+        children: [
+          // Full-screen brand gradient
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [_bg1, Color(0xFF122A1C), _bg2],
+                  stops: [0.0, 0.45, 1.0],
+                ),
+              ),
+            ),
           ),
-        ),
-        child: SafeArea(
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 460),
-                child: TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0, end: 1),
-                  duration: const Duration(milliseconds: 450),
-                  curve: Curves.easeOutCubic,
-                  builder: (context, value, widget) {
-                    return Transform.translate(
-                      offset: Offset(0, 14 * (1 - value)),
-                      child: Opacity(opacity: value, child: widget),
-                    );
-                  },
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+
+          // Ambient glow blob
+          Positioned(
+            top: -60,
+            right: -60,
+            child: Container(
+              width: 200,
+              height: 200,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _glowG.withValues(alpha: 0.12),
+              ),
+            ),
+          ),
+
+          SafeArea(
+            bottom: false,
+            child: Column(
+              children: [
+                // Brand section (compact for non-login auth pages)
+                SizedBox(
+                  height: 180,
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0.0, end: 1.0),
+                    duration: const Duration(milliseconds: 500),
+                    curve: Curves.easeOutCubic,
+                    builder: (context, v, child) => Opacity(
+                      opacity: v,
+                      child: Transform.translate(
+                        offset: Offset(0, 12 * (1 - v)),
+                        child: child,
+                      ),
+                    ),
+                    child: Center(
                       child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          _AuthBrandHeader(
-                            icon: illustrationIcon,
-                            semanticsLabel: illustrationLabel,
+                          Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              Container(
+                                width: logoSize + 26,
+                                height: logoSize + 26,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: _glowG.withValues(alpha: 0.14),
+                                  border: Border.all(
+                                    color: _brightG.withValues(alpha: 0.16),
+                                    width: 1.2,
+                                  ),
+                                ),
+                              ),
+                              SudVetCircleLogo(
+                                size: logoSize,
+                                showOuterRing: false,
+                                backgroundColor: const Color(0xFF1A3E28),
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
                           Text(
-                            title,
-                            style: theme.textTheme.headlineMedium,
-                            textAlign: TextAlign.center,
+                            'SudVet',
+                            style: GoogleFonts.sora(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              letterSpacing: -0.4,
+                            ),
                           ),
-                          const SizedBox(height: 8),
-                          Text(
-                            subtitle,
-                            style: theme.textTheme.bodyLarge,
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 18),
-                          child,
                         ],
                       ),
                     ),
                   ),
                 ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
-class _AuthBrandHeader extends StatelessWidget {
-  const _AuthBrandHeader({required this.icon, required this.semanticsLabel});
-
-  final IconData icon;
-  final String semanticsLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final panelBg = isDark ? const Color(0xFF1A211B) : _authPanel;
-    final logoBg = isDark ? const Color(0xFF1F2922) : _authLogoBg;
-    final badgeBg = isDark ? const Color(0xFF202A23) : Colors.white.withValues(alpha: 0.92);
-    return Semantics(
-      label: semanticsLabel,
-      image: true,
-      child: Container(
-        height: 104,
-        decoration: BoxDecoration(
-          color: panelBg,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: _authBorder),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(15),
-          child: DecoratedBox(
-            decoration: BoxDecoration(color: logoBg),
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    child: Image.asset(
-                      _authLogoAsset,
-                      fit: BoxFit.contain,
-                      filterQuality: FilterQuality.high,
-                      errorBuilder: (context, error, stackTrace) {
-                        return const Center(
-                          child: Icon(
-                            Icons.medical_services_rounded,
-                            color: _authPrimary,
-                            size: 34,
+                // Form card
+                Expanded(
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0.0, end: 1.0),
+                    duration: const Duration(milliseconds: 520),
+                    curve: Curves.easeOutCubic,
+                    builder: (context, v, child) => Transform.translate(
+                      offset: Offset(0, 24 * (1 - v)),
+                      child: Opacity(opacity: v, child: child),
+                    ),
+                    child: Container(
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: formBg,
+                        borderRadius: const BorderRadius.vertical(
+                          top: Radius.circular(28),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.26),
+                            blurRadius: 36,
+                            offset: const Offset(0, -4),
                           ),
-                        );
-                      },
+                        ],
+                      ),
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(24, 28, 24, 32),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 440),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Text(
+                                  title,
+                                  style: GoogleFonts.sora(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.4,
+                                    color: labelC,
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  subtitle,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: mutedC,
+                                    height: 1.4,
+                                  ),
+                                ),
+                                const SizedBox(height: 22),
+                                child,
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                Positioned(
-                  right: 8,
-                  top: 8,
-                  child: Container(
-                    width: 30,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: badgeBg,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: _authBorder),
-                    ),
-                    child: Icon(icon, color: _authDeep, size: 16),
                   ),
                 ),
               ],
             ),
           ),
-        ),
+        ],
       ),
     );
   }

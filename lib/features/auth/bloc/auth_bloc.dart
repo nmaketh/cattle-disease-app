@@ -84,6 +84,36 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         ),
       );
     } on ApiException catch (e) {
+      // Shared ops_api backend may perform direct registration (no OTP challenge).
+      // In that case, fall back to immediate sign-in with the just-created credentials.
+      final message = e.message.toLowerCase();
+      final looksLikeDirectRegister =
+          message.contains('signup otp token missing') ||
+          message.contains('otp token missing in server response');
+      if (looksLikeDirectRegister) {
+        try {
+          final response = await _authRepository.login(
+            email: event.email,
+            password: event.password,
+          );
+          emit(AuthAuthenticated(response.user));
+          return;
+        } on ApiException catch (loginError) {
+          emit(
+            AuthFailure(
+              'Account created, but automatic sign-in failed. Please login manually. ${loginError.message}',
+            ),
+          );
+          return;
+        } catch (_) {
+          emit(
+            const AuthFailure(
+              'Account created, but automatic sign-in failed. Please login manually.',
+            ),
+          );
+          return;
+        }
+      }
       emit(AuthFailure(e.message));
     } catch (_) {
       emit(const AuthFailure('Could not create account right now.'));

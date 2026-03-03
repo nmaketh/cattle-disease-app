@@ -10,7 +10,6 @@ import '../features/auth/bloc/auth_bloc.dart';
 import '../features/auth/bloc/auth_state.dart';
 import '../features/auth/ui/login_page.dart';
 import '../features/auth/ui/forgot_password_page.dart';
-import '../features/auth/ui/landing_page.dart';
 import '../features/auth/ui/signup_page.dart';
 import '../features/auth/ui/splash_page.dart';
 import '../features/auth/ui/verify_signup_page.dart';
@@ -23,8 +22,6 @@ import '../features/cases/ui/result_page.dart';
 import '../features/home/ui/home_page.dart';
 import '../features/learn/ui/learn_page.dart';
 import '../features/settings/ui/settings_page.dart';
-import '../features/settings/data/settings_repository.dart';
-import '../features/vet/ui/vet_inbox_page.dart';
 import 'app_shell.dart';
 
 const _devServerSettingsEnabled = bool.fromEnvironment(
@@ -40,7 +37,7 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
       final authState = authBloc.state;
       final location = state.matchedLocation;
       final isSplash = location == '/splash';
-      final isWelcome = location == '/welcome';
+      final isLegacyWelcome = location == '/welcome';
       final isAuthRoute =
           location == '/login' ||
           location == '/signup' ||
@@ -49,7 +46,7 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
           _devServerSettingsEnabled && location == '/setup-api';
       final isOtpRoute = location == '/verify-signup';
       final isPublicRoute =
-          isAuthRoute || isPublicSetupRoute || isOtpRoute || isWelcome;
+          isAuthRoute || isPublicSetupRoute || isOtpRoute || isLegacyWelcome;
       final isAuthenticated = authState is AuthAuthenticated;
       final isUnknown =
           authState is AuthUnknown ||
@@ -60,11 +57,14 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
       }
 
       if (!isAuthenticated) {
-        return isPublicRoute ? null : '/welcome';
+        if (isLegacyWelcome) {
+          return '/login';
+        }
+        return isPublicRoute ? null : '/login';
       }
 
       if (isAuthenticated &&
-          (isAuthRoute || isOtpRoute || isSplash || isWelcome)) {
+          (isAuthRoute || isOtpRoute || isSplash || isLegacyWelcome)) {
         return '/app/home';
       }
 
@@ -74,7 +74,7 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
       GoRoute(path: '/splash', builder: (context, state) => const SplashPage()),
       GoRoute(
         path: '/welcome',
-        builder: (context, state) => const LandingPage(),
+        redirect: (context, state) => '/login',
       ),
       GoRoute(path: '/login', builder: (context, state) => const LoginPage()),
       GoRoute(
@@ -165,11 +165,29 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
         path: '/app/case/:id/chat',
         builder: (context, state) {
           final caseId = state.pathParameters['id']!;
+          final authState = authBloc.state;
+          final serverRole = authState is AuthAuthenticated
+              ? authState.user.role.toLowerCase()
+              : 'chw';
+          // Admin cannot participate in private VET↔CAHW chat.
+          if (serverRole == 'admin') {
+            return Scaffold(
+              appBar: AppBar(title: const Text('Case Chat')),
+              body: const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Text(
+                    'Chat is private between the CAHW and the assigned vet.\nAdmins use the Audit Timeline.',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            );
+          }
           return CaseChatPage(
             caseId: caseId,
             caseRepository: context.read<CaseRepository>(),
-            settingsRepository: context.read<SettingsRepository>(),
-            initialUserRole: 'chw',
+            initialUserRole: serverRole,
           );
         },
       ),
@@ -193,10 +211,6 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
           final animalId = state.pathParameters['id']!;
           return AnimalDetailPage(animalId: animalId);
         },
-      ),
-      GoRoute(
-        path: '/app/vet-inbox',
-        builder: (context, state) => const VetInboxPage(),
       ),
     ],
     errorBuilder: (context, state) => Scaffold(

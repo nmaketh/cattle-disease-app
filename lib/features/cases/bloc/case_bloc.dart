@@ -232,6 +232,7 @@ class CaseBloc extends Bloc<CaseEvent, CaseState> {
         attachments: event.attachments,
         notes: event.notes,
         shouldAttemptSync: shouldSync,
+        allowAssignment: false,
         apiBaseUrl: settings.apiBaseUrl,
       );
 

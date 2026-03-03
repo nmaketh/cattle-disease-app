@@ -77,8 +77,6 @@ class _SignUpPageState extends State<SignUpPage> {
       child: AuthScaffold(
         title: 'Create Account',
         subtitle: 'Set up your profile and start tracking cattle health.',
-        illustrationIcon: Icons.person_add_alt_1_rounded,
-        illustrationLabel: 'Sign up illustration',
         child: Form(
           key: _formKey,
           child: Column(
