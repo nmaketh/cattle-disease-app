@@ -112,6 +112,9 @@ class ApiClient {
       expiresInSeconds: response['expiresInSeconds'] is num
           ? (response['expiresInSeconds'] as num).toInt()
           : int.tryParse(response['expiresInSeconds']?.toString() ?? ''),
+      devOtp: response['devOtp']?.toString().trim().isNotEmpty == true
+          ? response['devOtp']!.toString().trim()
+          : null,
     );
   }
 
@@ -414,7 +417,8 @@ class ApiClient {
     final body = {'name': name, 'email': email, 'password': password};
     return _postFirstSuccessful(
       baseUrl: baseUrl,
-      paths: const ['/auth/signup', '/auth/register', '/signup', '/register'],
+      // OTP-only signup: do not fall back to direct /register endpoints.
+      paths: const ['/auth/signup', '/signup'],
       body: body,
     );
   }
@@ -463,6 +467,9 @@ class ApiClient {
         sawNotFound = true;
       } else if (response.statusCode >= 400 && response.statusCode < 500) {
         last4xxMessage = message ?? 'Authentication request failed.';
+      } else if (response.statusCode >= 500) {
+        // Server error — don't fall through to alternative paths; surface the error.
+        throw ApiException(message ?? 'Server error. Please try again.');
       }
     }
 

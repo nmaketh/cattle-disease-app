@@ -1,15 +1,6 @@
-$ErrorActionPreference = "Stop"
-
-$envFile = Join-Path $PSScriptRoot "env"
-if (Test-Path $envFile) {
-  Get-Content $envFile | ForEach-Object {
-    $line = $_.Trim()
-    if ($line.Length -eq 0 -or $line.StartsWith("#")) {
-      return
-    }
-    Invoke-Expression $line
-  }
+﻿$root = Split-Path -Parent $PSScriptRoot
+$target = Join-Path $root 'mobile_api\\run_mobile_api.ps1'
+if (-not (Test-Path $target)) {
+  throw 'mobile_api\\run_mobile_api.ps1 not found.'
 }
-
-Set-Location $PSScriptRoot
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+& $target

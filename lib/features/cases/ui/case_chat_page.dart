@@ -251,7 +251,12 @@ class _CaseChatPageState extends State<CaseChatPage> {
     final cs = Theme.of(context).colorScheme;
     final role = (item['senderRole'] ?? '').toString();
     final msg = (item['message'] ?? '').toString();
-    final mine = role.toLowerCase() == _userRole.toLowerCase();
+    String nr(String r) {
+      final l = r.toLowerCase();
+      return l == 'chw' ? 'cahw' : l;
+    }
+
+    final mine = nr(role) == nr(_userRole);
     final ts = _formatTime(item['createdAt']);
     final label = _roleLabel(role);
 

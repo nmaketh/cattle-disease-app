@@ -7,14 +7,12 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../../core/api/api_client.dart';
 import '../../../core/api/base_url_resolver.dart';
 import '../../../widgets/status_chip.dart';
 import '../../auth/bloc/auth_bloc.dart';
 import '../../auth/bloc/auth_state.dart';
-import '../../settings/data/settings_repository.dart';
 import '../bloc/case_bloc.dart';
 import '../bloc/case_event.dart';
 import '../bloc/case_state.dart';
@@ -85,7 +83,6 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
   final _prescriptionController = TextEditingController();
   final _followUpDateController = TextEditingController();
   String? _boundCaseId;
-  bool _isExporting = false;
   bool _isTimelineLoading = false;
   bool _isActionLoading = false;
   String _workflowStatus = 'unknown';
@@ -129,6 +126,26 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
   }
 
   String _chatLastSeenKey(String role, String caseId) => 'chat_last_seen_${role}_$caseId';
+
+  String _normalizeRole(String raw) {
+    final normalized = raw.trim().toLowerCase();
+    if (normalized == 'chw' || normalized == 'cahw') {
+      return 'cahw';
+    }
+    return normalized;
+  }
+
+  String _resolveCurrentUserRole({String? fallback}) {
+    final authState = context.read<AuthBloc>().state;
+    if (authState is AuthAuthenticated) {
+      final serverRole = _normalizeRole(authState.user.role);
+      if (serverRole.isNotEmpty) {
+        return serverRole;
+      }
+    }
+    final normalizedFallback = _normalizeRole(fallback ?? '');
+    return normalizedFallback.isEmpty ? 'cahw' : normalizedFallback;
+  }
 
   Map<String, String?> _currentActorIdentity() {
     final authState = context.read<AuthBloc>().state;
@@ -213,9 +230,10 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
   }
 
   bool _isHumanChatMessage(Map<String, dynamic> msg, String role) {
-    final sender = (msg['senderRole'] ?? '').toString().trim().toLowerCase();
+    final sender = _normalizeRole((msg['senderRole'] ?? '').toString());
+    final currentRole = _normalizeRole(role);
     if (sender.isEmpty) return false;
-    if (sender == role.toLowerCase()) return false;
+    if (sender == currentRole) return false;
     if (sender == 'system' || sender == 'receipt') return false;
     final body = (msg['message'] ?? '').toString().trim();
     return body.isNotEmpty;
@@ -261,13 +279,12 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
     }
     setState(() => _isTimelineLoading = true);
     try {
-      final settingsRepository = context.read<SettingsRepository>();
       final caseRepository = context.read<CaseRepository>();
-      final settings = await settingsRepository.load();
       final timeline = await caseRepository.getCaseTimeline(caseId);
       if (!mounted) {
         return;
       }
+      final resolvedRole = _resolveCurrentUserRole(fallback: _userRole);
       final msgs = timeline['messages'];
       final revs = timeline['reviews'];
       final recs = timeline['receipts'];
@@ -286,9 +303,9 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
           : const <String, dynamic>{};
       final prevUnreadCount = _chatUnreadCount;
       final isFirstWorkflowLoad = !_workflowLoadedOnce;
-      final unreadCount = await _computeUnreadCount(caseId, settings.userRole, parsedMsgs);
+      final unreadCount = await _computeUnreadCount(caseId, resolvedRole, parsedMsgs);
       final latestUnread = parsedMsgs.reversed.firstWhere(
-        (m) => _isHumanChatMessage(m, settings.userRole),
+        (m) => _isHumanChatMessage(m, resolvedRole),
         orElse: () => <String, dynamic>{},
       );
       final latestSig = latestUnread.isEmpty
@@ -306,7 +323,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
           latestSig != _lastChatAlertSignature &&
           alertCooldownPassed;
       setState(() {
-        _userRole = settings.userRole;
+        _userRole = resolvedRole;
         _workflowStatus = timeline['workflowStatus']?.toString() ?? 'unknown';
         _triageStatus = timeline['triageStatus']?.toString() ?? 'open';
         _timelineMessages = parsedMsgs;
@@ -735,38 +752,39 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                                       separatorBuilder: (context, index) => const SizedBox(height: 10),
                                       itemBuilder: (context, index) {
                                         final m = messages[index];
-                                        final role = (m['senderRole'] ?? 'unknown').toString();
+                                        final role = (m['senderRole'] ?? 'unknown').toString().trim();
                                         final senderName = (m['senderName'] ?? '').toString().trim();
                                         final body = (m['message'] ?? '').toString();
                                         final ts = fmtTs((m['createdAt'] ?? '').toString());
-                                        final mine = role.toLowerCase() == _userRole.toLowerCase();
+                                        final mine = _normalizeRole(role) == _normalizeRole(_userRole);
                                         final label = senderName.isNotEmpty
                                             ? '$senderName (${role.toUpperCase()})'
                                             : role.toUpperCase();
-                                        return Row(
-                                          mainAxisAlignment: mine ? MainAxisAlignment.end : MainAxisAlignment.start,
-                                          children: [
-                                            Flexible(
-                                              child: Container(
-                                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                                decoration: BoxDecoration(
-                                                  color: mine ? const Color(0xFFDCF8E7) : Colors.white,
-                                                  borderRadius: BorderRadius.circular(14),
-                                                  border: Border.all(color: const Color(0xFFE5E7EB)),
-                                                ),
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                                  children: [
-                                                    Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF4B5563))),
-                                                    const SizedBox(height: 4),
-                                                    Text(body),
-                                                    const SizedBox(height: 6),
-                                                    Text(ts, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280))),
-                                                  ],
-                                                ),
+                                        return Align(
+                                          alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+                                          child: ConstrainedBox(
+                                            constraints: BoxConstraints(
+                                              maxWidth: MediaQuery.of(context).size.width * 0.72,
+                                            ),
+                                            child: Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                              decoration: BoxDecoration(
+                                                color: mine ? const Color(0xFFDCF8E7) : Colors.white,
+                                                borderRadius: BorderRadius.circular(14),
+                                                border: Border.all(color: const Color(0xFFE5E7EB)),
+                                              ),
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF4B5563))),
+                                                  const SizedBox(height: 4),
+                                                  Text(body),
+                                                  const SizedBox(height: 6),
+                                                  Text(ts, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280))),
+                                                ],
                                               ),
                                             ),
-                                          ],
+                                          ),
                                         );
                                       },
                                     ),
@@ -814,7 +832,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                                           try {
                                             await context.read<CaseRepository>().addCaseMessage(
                                               caseId: caseId,
-                                              senderRole: _userRole,
+                                              senderRole: _normalizeRole(_userRole),
                                               senderId: _currentActorIdentity()['id'],
                                               senderName: _currentActorIdentity()['name'],
                                               senderEmail: _currentActorIdentity()['email'],
@@ -993,7 +1011,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
       await context.read<CaseRepository>().closeCase(
         caseId: caseId,
         outcome: outcome,
-        senderRole: _userRole,
+        senderRole: _normalizeRole(_userRole),
         senderId: _currentActorIdentity()['id'],
         senderName: _currentActorIdentity()['name'],
         senderEmail: _currentActorIdentity()['email'],
@@ -1074,97 +1092,6 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
 
     context.read<CaseBloc>().add(CaseDeleted(caseId));
     context.go('/app/history');
-  }
-
-  Future<void> _exportSummary(String caseId) async {
-    if (_isExporting) {
-      return;
-    }
-    setState(() => _isExporting = true);
-    try {
-      final repository = context.read<CaseRepository>();
-      final settingsRepository = context.read<SettingsRepository>();
-      final payload = await repository.exportCaseSummary(caseId);
-      final summary = payload['summaryText']?.toString() ?? 'No summary available.';
-      final subject = 'Livestock case summary: $caseId';
-      final settings = await settingsRepository.load();
-      final vetEmail = settings.vetEmail.trim();
-      if (!mounted) {
-        return;
-      }
-      final messenger = ScaffoldMessenger.of(context);
-      await showDialog<void>(
-        context: context,
-        builder: (context) {
-          return AlertDialog(
-            title: const Text('Case Summary'),
-            content: SizedBox(
-              width: 520,
-              child: SingleChildScrollView(
-                child: SelectableText(summary),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () async {
-                  await Clipboard.setData(ClipboardData(text: summary));
-                  messenger.showSnackBar(
-                    const SnackBar(content: Text('Summary copied to clipboard.')),
-                  );
-                },
-                child: const Text('Copy'),
-              ),
-              TextButton(
-                onPressed: () async {
-                  if (vetEmail.isEmpty && mounted) {
-                    messenger.showSnackBar(
-                      const SnackBar(
-                        content: Text('Vet email not set. Add it in Settings for one-tap send.'),
-                      ),
-                    );
-                  }
-                  final uri = Uri(
-                    scheme: 'mailto',
-                    path: vetEmail,
-                    queryParameters: {
-                      'subject': subject,
-                      'body': summary,
-                    },
-                  ).toString();
-                  final ok = await launchUrlString(uri);
-                  if (!ok && mounted) {
-                    messenger.showSnackBar(
-                      const SnackBar(content: Text('Unable to open email app on this device.')),
-                    );
-                  }
-                },
-                child: const Text('Email Vet'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Close'),
-              ),
-            ],
-          );
-        },
-      );
-    } on ApiException catch (e) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to export case summary.')),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _isExporting = false);
-      }
-    }
   }
 
   String _sectionLabel(_CaseDetailSection section) {
@@ -1811,7 +1738,7 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                         const SizedBox(height: 10),
                         if (_timelineReviews.isNotEmpty) ...[
                           Text(
-                            'Latest Vet Review',
+                            'Latest Vet Advice',
                             style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
                           ),
                           const SizedBox(height: 6),
@@ -1819,12 +1746,21 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                             builder: (context) {
                               final latest = _timelineReviews.last;
                               final created = latest['createdAt']?.toString() ?? '';
-                              return Text(
-                                'Assessment: ${latest['assessment'] ?? '-'}\n'
-                                'Plan: ${latest['plan'] ?? '-'}\n'
-                                'Prescription: ${latest['prescription'] ?? '-'}\n'
-                                'Follow-up: ${latest['followUpDate'] ?? '-'}\n'
-                                'At: $created',
+                              return Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  'Assessment: ${latest['assessment'] ?? '-'}\n'
+                                  'Plan: ${latest['plan'] ?? '-'}\n'
+                                  'Prescription: ${latest['prescription'] ?? '-'}\n'
+                                  'Follow-up: ${latest['followUpDate'] ?? '-'}\n'
+                                  'At: $created',
+                                  style: const TextStyle(height: 1.6),
+                                ),
                               );
                             },
                           ),
@@ -1889,12 +1825,6 @@ class _CaseDetailPageState extends State<CaseDetailPage> {
                   onPressed: () => context.push('/app/result/${item.id}'),
                   icon: const Icon(Icons.analytics_outlined),
                   label: const Text('View Result'),
-                ),
-                const SizedBox(height: 10),
-                OutlinedButton.icon(
-                  onPressed: _isExporting ? null : () => _exportSummary(item.id),
-                  icon: const Icon(Icons.share_outlined),
-                  label: Text(_isExporting ? 'Exporting...' : 'Export / Share'),
                 ),
                 const SizedBox(height: 10),
                 TextButton.icon(

@@ -55,9 +55,16 @@ def _ensure_otp_delivery_configured() -> None:
 
 @router.post("/register", response_model=AuthUser)
 @limiter.limit("5/minute")
-def register(request: Request, payload: RegisterRequest, db: Session = Depends(get_db)):
-    """Direct admin-style registration — no OTP, returns AuthUser only (no tokens).
-    Use /auth/signup for the mobile OTP flow which returns a token pair on verify."""
+def register(
+    request: Request,
+    payload: RegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Admin-only direct registration — no OTP, returns AuthUser only (no tokens)."""
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Only admins can create users via /auth/register")
+
     exists = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
     if exists:
         raise HTTPException(status_code=409, detail="Email already registered")

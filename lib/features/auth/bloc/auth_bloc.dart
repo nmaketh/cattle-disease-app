@@ -80,39 +80,24 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         AuthOtpRequired(
           signupToken: challenge.signupToken,
           email: challenge.email,
-          message: 'OTP sent to ${challenge.email}.',
+          message: challenge.devOtp != null
+              ? 'Dev mode — use code: ${challenge.devOtp}'
+              : 'OTP sent to ${challenge.email}.',
+          devOtp: challenge.devOtp,
         ),
       );
     } on ApiException catch (e) {
-      // Shared ops_api backend may perform direct registration (no OTP challenge).
-      // In that case, fall back to immediate sign-in with the just-created credentials.
       final message = e.message.toLowerCase();
-      final looksLikeDirectRegister =
+      final missingOtpToken =
           message.contains('signup otp token missing') ||
           message.contains('otp token missing in server response');
-      if (looksLikeDirectRegister) {
-        try {
-          final response = await _authRepository.login(
-            email: event.email,
-            password: event.password,
-          );
-          emit(AuthAuthenticated(response.user));
-          return;
-        } on ApiException catch (loginError) {
-          emit(
-            AuthFailure(
-              'Account created, but automatic sign-in failed. Please login manually. ${loginError.message}',
-            ),
-          );
-          return;
-        } catch (_) {
-          emit(
-            const AuthFailure(
-              'Account created, but automatic sign-in failed. Please login manually.',
-            ),
-          );
-          return;
-        }
+      if (missingOtpToken) {
+        emit(
+          const AuthFailure(
+            'Signup verification failed: OTP challenge was not returned. Please retry signup.',
+          ),
+        );
+        return;
       }
       emit(AuthFailure(e.message));
     } catch (_) {

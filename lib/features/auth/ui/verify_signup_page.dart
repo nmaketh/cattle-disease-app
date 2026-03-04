@@ -15,10 +15,12 @@ class VerifySignupPage extends StatefulWidget {
     super.key,
     required this.signupToken,
     required this.email,
+    this.devOtp,
   });
 
   final String signupToken;
   final String email;
+  final String? devOtp;
 
   @override
   State<VerifySignupPage> createState() => _VerifySignupPageState();
@@ -56,6 +58,14 @@ class _VerifySignupPageState extends State<VerifySignupPage> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    if (widget.devOtp != null) {
+      _otpController.text = widget.devOtp!;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return BlocListener<AuthBloc, AuthState>(
       listener: (context, state) {
@@ -71,12 +81,37 @@ class _VerifySignupPageState extends State<VerifySignupPage> {
       },
       child: AuthScaffold(
         title: 'Verify Email',
-        subtitle: 'Enter the OTP sent to ${widget.email}.',
+        subtitle: widget.devOtp != null
+            ? 'Dev mode: email not sent. Code pre-filled below.'
+            : 'Enter the OTP sent to ${widget.email}.',
         child: Form(
           key: _formKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (widget.devOtp != null) ...[
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.shade50,
+                    border: Border.all(color: Colors.amber.shade300),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.developer_mode, color: Colors.amber, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Dev code: ${widget.devOtp}',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               AppTextField(
                 controller: _otpController,
                 label: 'OTP code',

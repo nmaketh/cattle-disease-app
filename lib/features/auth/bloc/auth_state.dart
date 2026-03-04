@@ -49,12 +49,14 @@ class AuthOtpRequired extends AuthState {
     required this.signupToken,
     required this.email,
     this.message,
+    this.devOtp,
   });
 
   final String signupToken;
   final String email;
   final String? message;
+  final String? devOtp;
 
   @override
-  List<Object?> get props => [signupToken, email, message];
+  List<Object?> get props => [signupToken, email, message, devOtp];
 }

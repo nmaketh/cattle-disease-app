@@ -90,7 +90,12 @@ GoRouter buildRouter({required AuthBloc authBloc}) {
           if (signupToken.isEmpty || email.isEmpty) {
             return const LoginPage();
           }
-          return VerifySignupPage(signupToken: signupToken, email: email);
+          final devOtp = state.uri.queryParameters['dev'];
+          return VerifySignupPage(
+            signupToken: signupToken,
+            email: email,
+            devOtp: devOtp?.isNotEmpty == true ? devOtp : null,
+          );
         },
       ),
       if (_devServerSettingsEnabled)

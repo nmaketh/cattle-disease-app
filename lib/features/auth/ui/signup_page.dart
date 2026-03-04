@@ -71,7 +71,10 @@ class _SignUpPageState extends State<SignUpPage> {
         if (state is AuthOtpRequired) {
           final token = Uri.encodeComponent(state.signupToken);
           final email = Uri.encodeComponent(state.email);
-          context.go('/verify-signup?token=$token&email=$email');
+          final devParam = state.devOtp != null
+              ? '&dev=${Uri.encodeComponent(state.devOtp!)}'
+              : '';
+          context.go('/verify-signup?token=$token&email=$email$devParam');
         }
       },
       child: AuthScaffold(

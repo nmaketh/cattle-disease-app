@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"c:/Users/HP/cattle_disease_app/ops_api/app/schemas/case.py\":*)",
+      "Bash(python -m pytest tests/test_case_policy.py -v)",
+      "Bash(/c/Users/HP/cattle_disease_app/.venv311/Scripts/python.exe -m pytest tests/test_case_policy.py -v)"
+    ]
+  }
+}
